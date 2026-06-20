@@ -18,8 +18,7 @@ _autosave-*
 *-save.pro
 *-save.kicad_pcb
 fp-info-cache
-/CANbus_Logging_Bridge/build
-/CANbus_Logging_Bridge/CANbus_Logging_Bridge-backups
+/CAN_Gateway/CAN_Gateway-backups
 
 # Netlist files (exported from Eeschema)
 *.net
