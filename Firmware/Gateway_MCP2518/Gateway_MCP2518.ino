@@ -1,5 +1,5 @@
 #include <SPI.h>
-#include <SparkFun_I2C_Expander_Arduino_Library.h>
+#include <SparkFun_I2C_Expander_Arduino_Library.h> //https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
 #include "mcp2518fd_can.h"
 #include "FS.h"
 #include "SD_MMC.h"
@@ -204,14 +204,6 @@ void printErrors() {
 
 // Initialize ALL THE THINGS
 void setup() {
-  // Create pinned task
-  xTaskCreatePinnedToCore(canMonitor,   // Task Function
-                          "CANMonitor", // Task Name
-                          20000,        // Stack Size (words)
-                          NULL,         // Input Param
-                          1,            // Priority
-                          &canTask,     // Task Handle
-                          0);           // Core where the task should run
 
   Serial.begin(921600);
   Wire.begin(1, 2);
@@ -252,6 +244,9 @@ void setup() {
   spi0->begin(14, 12, 13, -1);
   spi1->begin(11, 9, 10, -1);
 
+  spi0->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
+  spi1->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
+
   // Configure and start each CAN tcvr
   
   for (uint8_t i = 0; i < 6; i++) {
@@ -290,15 +285,21 @@ void setup() {
   pinMode(43, OUTPUT);
   digitalWrite(43, 0);
 
+  // Create pinned task
+  xTaskCreatePinnedToCore(canMonitor,   // Task Function
+                          "CANMonitor", // Task Name
+                          20000,        // Stack Size (words)
+                          NULL,         // Input Param
+                          1,            // Priority
+                          &canTask,     // Task Handle
+                          0);           // Core where the task should run  
+
   return;
 }
 
 // This task is pinned to Core 0. Its job is mostly to get interrupted.
 // It also waits for Serial and reports errors. 
 void canMonitor(void *parameter) {
-
-  spi0->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
-  spi1->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
 
   for (;;) {
     // Poll all of the CAN transceivers
