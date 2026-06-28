@@ -154,10 +154,10 @@ extern "C" {
 #define MCP2518FD
 
 // Maximum Size of TX/RX Object
-#define MAX_MSG_SIZE 76
+#define MAX_MSG_SIZE 20
 
 // Maximum number of data bytes in message
-#define MAX_DATA_BYTES 64
+#define MAX_DATA_BYTES 8
 
 // *****************************************************************************
 // *****************************************************************************

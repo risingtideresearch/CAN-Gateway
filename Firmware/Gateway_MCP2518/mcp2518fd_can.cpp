@@ -1,20 +1,11 @@
 /* Most of this code are derived from Microchip MCP2518FD SDK */
 #include "mcp2518fd_can.h"
 
-//static CAN_CONFIG config;
-
+// CAN_CONFIG config;
 CAN_CONFIG config;
 
 
 // Receive objects
-/*
-static CAN_RX_FIFO_CONFIG rxConfig;
-static REG_CiFLTOBJ fObj;
-static REG_CiMASK mObj;
-static CAN_RX_FIFO_EVENT rxFlags;
-static CAN_RX_MSGOBJ rxObj;
-static uint8_t rxd[MAX_DATA_BYTES];
-*/
 CAN_RX_FIFO_CONFIG rxConfig;
 REG_CiFLTOBJ fObj;
 REG_CiMASK mObj;
@@ -23,12 +14,6 @@ CAN_RX_MSGOBJ rxObj;
 uint8_t rxd[MAX_DATA_BYTES];
 
 // Transmit objects
-/*
-static CAN_TX_FIFO_CONFIG txConfig;
-static CAN_TX_FIFO_EVENT txFlags;
-static CAN_TX_MSGOBJ txObj;
-static uint8_t txd[MAX_DATA_BYTES];
-*/
 CAN_TX_FIFO_CONFIG txConfig;
 CAN_TX_FIFO_EVENT txFlags;
 CAN_TX_MSGOBJ txObj;
@@ -49,13 +34,8 @@ uint8_t txd[MAX_DATA_BYTES];
 // *****************************************************************************
 // Section: Variables
 
-//! SPI Transmit buffer
-//static uint8_t spiTransmitBuffer[SPI_DEFAULT_BUFFER_LENGTH + 2];
-uint8_t spiTransmitBuffer[SPI_DEFAULT_BUFFER_LENGTH + 2];
-
-//! SPI Receive buffer
-//static uint8_t spiReceiveBuffer[SPI_DEFAULT_BUFFER_LENGTH];
-uint8_t spiReceiveBuffer[SPI_DEFAULT_BUFFER_LENGTH];
+//! SPI Transfer buffer
+uint8_t spiTransferBuffer[SPI_DEFAULT_BUFFER_LENGTH];
 
 uint16_t DRV_CANFDSPI_CalculateCRC16(uint8_t *data, uint16_t size) {
   uint16_t init = CRCBASE;
@@ -92,19 +72,13 @@ int8_t mcp2518fd::mcp2518fd_reset(void) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] = (uint8_t)(cINSTRUCTION_RESET << 4);
-  spiTransmitBuffer[1] = 0;
+  spiTransferBuffer[0] = (uint8_t)(cINSTRUCTION_RESET << 4);
+  spiTransferBuffer[1] = 0x00;
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
+  spi_readwrite(spiTransferBuffer, 2);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
+
   delay(10);
 
   return spiTransferError;
@@ -114,24 +88,17 @@ int8_t mcp2518fd::mcp2518fd_ReadByte(uint16_t address, uint8_t *rxd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-  spiTransmitBuffer[2] = 0;
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[2] = 0x00;
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spiReceiveBuffer[2] = spi_readwrite(0x00);
+  spi_readwrite(spiTransferBuffer, 3);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
+
   // Update data
-  *rxd = spiReceiveBuffer[2];
+  *rxd = spiTransferBuffer[2];
 
   return spiTransferError;
 }
@@ -140,22 +107,14 @@ int8_t mcp2518fd::mcp2518fd_WriteByte(uint16_t address, uint8_t txd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-  spiTransmitBuffer[2] = txd;
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[2] = txd;
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
+  spi_readwrite(spiTransferBuffer, 3);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -166,28 +125,21 @@ int8_t mcp2518fd::mcp2518fd_ReadWord(uint16_t address, uint32_t *rxd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
-  MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
   for (i = 2; i < 6; i++) {
-    spiReceiveBuffer[i] = spi_readwrite(0x00);
+    spiTransferBuffer[i] = 0x00;
   }
+
+  MCP2518fd_SELECT();
+  spi_readwrite(spiTransferBuffer, 6);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   // Update data
   *rxd = 0;
   for (i = 2; i < 6; i++) {
-    x = (uint32_t)spiReceiveBuffer[i];
+    x = (uint32_t)spiTransferBuffer[i];
     *rxd += x << ((i - 2) * 8);
   }
 
@@ -199,29 +151,18 @@ int8_t mcp2518fd::mcp2518fd_WriteWord(uint16_t address, uint32_t txd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
 
   // Split word into 4 bytes and add them to buffer
   for (i = 0; i < 4; i++) {
-    spiTransmitBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
+    spiTransferBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  spi_readwrite(spiTransmitBuffer[3]);
-  spi_readwrite(spiTransmitBuffer[4]);
-  spi_readwrite(spiTransmitBuffer[5]);
+  spi_readwrite(spiTransferBuffer, 6);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -232,28 +173,21 @@ int8_t mcp2518fd::mcp2518fd_ReadHalfWord(uint16_t address, uint16_t *rxd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
-  MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  for (i = 2; i < 4; i++) {
-    spiReceiveBuffer[i] = spi_readwrite(0x00);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+    for (i = 2; i < 4; i++) {
+    spiTransferBuffer[i] = 0x00;
   }
+
+  MCP2518fd_SELECT();
+  spi_readwrite(spiTransferBuffer, 4);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   // Update data
   *rxd = 0;
   for (i = 2; i < 4; i++) {
-    x = (uint32_t)spiReceiveBuffer[i];
+    x = (uint32_t)spiTransferBuffer[i];
     *rxd += x << ((i - 2) * 8);
   }
 
@@ -265,27 +199,18 @@ int8_t mcp2518fd::mcp2518fd_WriteHalfWord(uint16_t address, uint16_t txd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
 
   // Split word into 2 bytes and add them to buffer
   for (i = 0; i < 2; i++) {
-    spiTransmitBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
+    spiTransferBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  spi_readwrite(spiTransmitBuffer[3]);
+  spi_readwrite(spiTransferBuffer, 4);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -297,32 +222,22 @@ int8_t mcp2518fd::mcp2518fd_ReadByteArray(uint16_t address, uint8_t *rxd,
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
 
   // Clear data
   for (i = 2; i < spiTransferSize; i++) {
-    spiTransmitBuffer[i] = 0;
+    spiTransferBuffer[i] = 0x00;
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  for (i = 0; i < nBytes; i++) {
-    spiReceiveBuffer[i + 2] = spi_readwrite(0x00);
-  }
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   // Update data
   for (i = 0; i < nBytes; i++) {
-    rxd[i] = spiReceiveBuffer[i + 2];
+    rxd[i] = spiTransferBuffer[i + 2];
   }
 
   return spiTransferError;
@@ -335,27 +250,17 @@ int8_t mcp2518fd::mcp2518fd_WriteByteArray(uint16_t address, uint8_t *txd,
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
   // Add data
   for (i = 2; i < spiTransferSize; i++) {
-    spiTransmitBuffer[i] = txd[i - 2];
+    spiTransferBuffer[i] = txd[i - 2];
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  for (i = 2; i < spiTransferSize; i++) {
-    spi_readwrite(spiTransmitBuffer[i]);
-  }
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -365,29 +270,19 @@ int8_t mcp2518fd::mcp2518fd_WriteByteSafe(uint16_t address, uint8_t txd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE_SAFE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-  spiTransmitBuffer[2] = txd;
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[2] = txd;
 
   // Add CRC
-  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransmitBuffer, 3);
-  spiTransmitBuffer[3] = (crcResult >> 8) & 0xFF;
-  spiTransmitBuffer[4] = crcResult & 0xFF;
+  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransferBuffer, 3);
+  spiTransferBuffer[3] = (crcResult >> 8) & 0xFF;
+  spiTransferBuffer[4] = crcResult & 0xFF;
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  spi_readwrite(spiTransmitBuffer[3]);
-  spi_readwrite(spiTransmitBuffer[4]);
+  spi_readwrite(spiTransferBuffer, 5);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -398,36 +293,23 @@ int8_t mcp2518fd::mcp2518fd_WriteWordSafe(uint16_t address, uint32_t txd) {
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE_SAFE << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
 
   // Split word into 4 bytes and add them to buffer
   for (i = 0; i < 4; i++) {
-    spiTransmitBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
+    spiTransferBuffer[i + 2] = (uint8_t)((txd >> (i * 8)) & 0xFF);
   }
 
   // Add CRC
-  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransmitBuffer, 6);
-  spiTransmitBuffer[6] = (crcResult >> 8) & 0xFF;
-  spiTransmitBuffer[7] = crcResult & 0xFF;
+  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransferBuffer, 6);
+  spiTransferBuffer[6] = (crcResult >> 8) & 0xFF;
+  spiTransferBuffer[7] = crcResult & 0xFF;
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  spi_readwrite(spiTransmitBuffer[3]);
-  spi_readwrite(spiTransmitBuffer[4]);
-  spi_readwrite(spiTransmitBuffer[5]);
-  spi_readwrite(spiTransmitBuffer[6]);
-  spi_readwrite(spiTransmitBuffer[7]);
+  spi_readwrite(spiTransferBuffer, 8);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -442,43 +324,36 @@ int8_t mcp2518fd::mcp2518fd_ReadByteArrayWithCRC(uint16_t address, uint8_t *rxd,
       nBytes + 5; // first two bytes for sending command & address, third for
                   // size, last two bytes for CRC
   int8_t spiTransferError = 0;
+  uint8_t preamble[3];
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_READ_CRC << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-  spiTransmitBuffer[2] = fromRam? (nBytes >> 2): nBytes;
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[2] = fromRam? (nBytes >> 2): nBytes;
 
-  // Clear data
+  preamble[0] = spiTransferBuffer[0];
+  preamble[1] = spiTransferBuffer[1];
+  preamble[2] = spiTransferBuffer[2];
+
   for (i = 3; i < spiTransferSize; i++) {
-    spiTransmitBuffer[i] = 0;
+    spiTransferBuffer[i] = 0x00;
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  for (i = 3; i < spiTransferSize; i++) {
-    spiReceiveBuffer[i] = spi_readwrite(0x00);
-  }
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   // Get CRC from controller
-  crcFromSpiSlave = (uint16_t)(spiReceiveBuffer[spiTransferSize - 2] << 8) +
-                    (uint16_t)(spiReceiveBuffer[spiTransferSize - 1]);
+  crcFromSpiSlave = (uint16_t)(spiTransferBuffer[spiTransferSize - 2] << 8) +
+                    (uint16_t)(spiTransferBuffer[spiTransferSize - 1]);
 
   // Use the receive buffer to calculate CRC
   // First three bytes need to be command
-  spiReceiveBuffer[0] = spiTransmitBuffer[0];
-  spiReceiveBuffer[1] = spiTransmitBuffer[1];
-  spiReceiveBuffer[2] = spiTransmitBuffer[2];
-  crcAtController = DRV_CANFDSPI_CalculateCRC16(spiReceiveBuffer, nBytes + 3);
+  spiTransferBuffer[0] = preamble[0];
+  spiTransferBuffer[1] = preamble[1];
+  spiTransferBuffer[2] = preamble[2];
+  crcAtController = DRV_CANFDSPI_CalculateCRC16(spiTransferBuffer, nBytes + 3);
 
   // Compare CRC readings
   if (crcFromSpiSlave == crcAtController) {
@@ -489,7 +364,7 @@ int8_t mcp2518fd::mcp2518fd_ReadByteArrayWithCRC(uint16_t address, uint8_t *rxd,
 
   // Update data
   for (i = 0; i < nBytes; i++) {
-    rxd[i] = spiReceiveBuffer[i + 3];
+    rxd[i] = spiTransferBuffer[i + 3];
   }
 
   return spiTransferError;
@@ -504,37 +379,24 @@ int8_t mcp2518fd::mcp2518fd_WriteByteArrayWithCRC(uint16_t address,
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] =
+  spiTransferBuffer[0] =
       (uint8_t)((cINSTRUCTION_WRITE_CRC << 4) + ((address >> 8) & 0xF));
-  spiTransmitBuffer[1] = (uint8_t)(address & 0xFF);
-  spiTransmitBuffer[2] = fromRam? (nBytes >> 2): nBytes;
+  spiTransferBuffer[1] = (uint8_t)(address & 0xFF);
+  spiTransferBuffer[2] = fromRam? (nBytes >> 2): nBytes;
 
   // Add data
   for (i = 0; i < nBytes; i++) {
-    spiTransmitBuffer[i + 3] = txd[i];
+    spiTransferBuffer[i + 3] = txd[i];
   }
 
   // Add CRC
-  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransmitBuffer, spiTransferSize - 2);
-  spiTransmitBuffer[spiTransferSize - 2] = (uint8_t)((crcResult >> 8) & 0xFF);
-  spiTransmitBuffer[spiTransferSize - 1] = (uint8_t)(crcResult & 0xFF);
+  crcResult = DRV_CANFDSPI_CalculateCRC16(spiTransferBuffer, spiTransferSize - 2);
+  spiTransferBuffer[spiTransferSize - 2] = (uint8_t)((crcResult >> 8) & 0xFF);
+  spiTransferBuffer[spiTransferSize - 1] = (uint8_t)(crcResult & 0xFF);
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  spi_readwrite(spiTransmitBuffer[2]);
-  for (i = 0; i < nBytes; i++) {
-    spi_readwrite(spiTransmitBuffer[i + 3]);
-  }
-  spi_readwrite(spiTransmitBuffer[spiTransferSize - 2]);
-  spi_readwrite(spiTransmitBuffer[spiTransferSize - 1]);
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -547,34 +409,22 @@ int8_t mcp2518fd::mcp2518fd_ReadWordArray(uint16_t address, uint32_t *rxd,
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] = (cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF);
-  spiTransmitBuffer[1] = address & 0xFF;
-
-  // Clear data
+  spiTransferBuffer[0] = (cINSTRUCTION_READ << 4) + ((address >> 8) & 0xF);
+  spiTransferBuffer[1] = address & 0xFF;
   for (i = 2; i < spiTransferSize; i++) {
-    spiTransmitBuffer[i] = 0;
+    spiTransferBuffer[i] = 0x00;
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  for (i = 2; i < spiTransferSize; i++) {
-    // for (i = 2; i < 6; i++) {
-    spiReceiveBuffer[i] = spi_readwrite(0x00);
-  }
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
+
   // Convert Byte array to Word array
   n = 2;
   for (i = 0; i < nWords; i++) {
     w.word = 0;
     for (j = 0; j < 4; j++, n++) {
-      w.byte[j] = spiReceiveBuffer[n];
+      w.byte[j] = spiTransferBuffer[n];
     }
     rxd[i] = w.word;
   }
@@ -589,31 +439,21 @@ int8_t mcp2518fd::mcp2518fd_WriteWordArray(uint16_t address, uint32_t *txd,
   int8_t spiTransferError = 0;
 
   // Compose command
-  spiTransmitBuffer[0] = (cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF);
-  spiTransmitBuffer[1] = address & 0xFF;
+  spiTransferBuffer[0] = (cINSTRUCTION_WRITE << 4) + ((address >> 8) & 0xF);
+  spiTransferBuffer[1] = address & 0xFF;
 
   // Convert ByteArray to word array
   n = 2;
   for (i = 0; i < nWords; i++) {
     w.word = txd[i];
     for (j = 0; j < 4; j++, n++) {
-      spiTransmitBuffer[n] = w.byte[j];
+      spiTransferBuffer[n] = w.byte[j];
     }
   }
 
-#ifdef SPI_HAS_TRANSACTION
-  SPI_BEGIN();
-#endif
   MCP2518fd_SELECT();
-  spi_readwrite(spiTransmitBuffer[0]);
-  spi_readwrite(spiTransmitBuffer[1]);
-  for (i = 2; i < spiTransferSize; i++) {
-    spi_readwrite(spiTransmitBuffer[i]);
-  }
+  spi_readwrite(spiTransferBuffer, spiTransferSize);
   MCP2518fd_UNSELECT();
-#ifdef SPI_HAS_TRANSACTION
-  SPI_END();
-#endif
 
   return spiTransferError;
 }
@@ -1971,7 +1811,7 @@ byte mcp2518fd::init_Filt(byte num, byte ext, unsigned long ulData) {
 /*********************************************************************************************************
 ** Function name:           setSleepWakeup
 ** Descriptions:            Enable or disable the wake up interrupt (If disabled
-*the MCP2515 will not be woken up by CAN bus activity)
+*                           the MCP2515 will not be woken up by CAN bus activity)
 *********************************************************************************************************/
 void mcp2518fd::setSleepWakeup(const byte enable) {
   if (enable) {
@@ -1996,7 +1836,7 @@ byte mcp2518fd::sleep() {
 /*********************************************************************************************************
 ** Function name:           wake
 ** Descriptions:            wake MCP2515 manually from sleep. It will come back
-*in the mode it was before sleeping.
+*                           in the mode it was before sleeping.
 *********************************************************************************************************/
 byte mcp2518fd::wake() {
   byte currMode = getMode();
@@ -2033,7 +1873,7 @@ byte mcp2518fd::setMode(const byte opMode) {
 /*********************************************************************************************************
 ** Function name:           readMsgBufID
 ** Descriptions:            Read message buf and can bus source ID according to
-*status.
+*                           status.
 **                          Status has to be read with readRxTxStatus.
 *********************************************************************************************************/
 byte mcp2518fd::readMsgBufID(byte status, volatile unsigned long *id,
@@ -2079,7 +1919,7 @@ byte mcp2518fd::checkError(uint8_t* err_ptr) {
 // /*********************************************************************************************************
 // ** Function name:           readMsgBufID
 // ** Descriptions:            Read message buf and can bus source ID according
-// to status.
+//                             to status.
 // **                          Status has to be read with readRxTxStatus.
 // *********************************************************************************************************/
 byte mcp2518fd::mcp2518fd_readMsgBufID(volatile byte *len, volatile byte *buf) {
@@ -2102,7 +1942,7 @@ byte mcp2518fd::mcp2518fd_readMsgBufID(volatile byte *len, volatile byte *buf) {
 /*********************************************************************************************************
 ** Function name:           trySendMsgBuf
 ** Descriptions:            Try to send message. There is no delays for waiting
-*free buffer.
+*                           free buffer.
 *********************************************************************************************************/
 byte mcp2518fd::trySendMsgBuf(unsigned long id, byte ext, byte rtr, byte len,
                               const byte *buf, byte iTxBuf) {
@@ -2113,9 +1953,9 @@ byte mcp2518fd::trySendMsgBuf(unsigned long id, byte ext, byte rtr, byte len,
 /*********************************************************************************************************
 ** Function name:           clearBufferTransmitIfFlags
 ** Descriptions:            Clear transmit interrupt flags for specific buffer
-*or for all unreserved buffers.
+*                           or for all unreserved buffers.
 **                          If interrupt will be used, it is important to clear
-*all flags, when there is no
+*                           all flags, when there is no
 **                          more data to be sent. Otherwise IRQ will newer
 *change state.
 *********************************************************************************************************/
@@ -2129,7 +1969,7 @@ void mcp2518fd::clearBufferTransmitIfFlags(byte flags) {
 ** Descriptions:            Send message by using buffer read as free from
 *CANINTF status
 **                          Status has to be read with readRxTxStatus and
-*filtered with checkClearTxStatus
+*                           filtered with checkClearTxStatus
 *********************************************************************************************************/
 byte mcp2518fd::sendMsgBuf(byte status, unsigned long id, byte ext, byte rtr,
                            byte len, volatile const byte *buf) {
@@ -2148,11 +1988,11 @@ byte mcp2518fd::sendMsgBuf(unsigned long id, byte ext, byte rtr, byte len,
 /*********************************************************************************************************
 ** Function name:           readRxTxStatus
 ** Descriptions:            Read RX and TX interrupt bits. Function uses status
-*reading, but translates.
+*                           reading, but translates.
 **                          result to MCP_CANINTF. With this you can check
-*status e.g. on interrupt sr
+*                           status e.g. on interrupt sr
 **                          with one single call to save SPI calls. Then use
-*checkClearRxStatus and
+*                           heckClearRxStatus and
 **                          checkClearTxStatus for testing.
 *********************************************************************************************************/
 byte mcp2518fd::readRxTxStatus(void) {
@@ -2165,9 +2005,9 @@ byte mcp2518fd::readRxTxStatus(void) {
 /*********************************************************************************************************
 ** Function name:           checkClearRxStatus
 ** Descriptions:            Return first found rx CANINTF status and clears it
-*from parameter.
+*                           from parameter.
 **                          Note that this does not affect to chip CANINTF at
-*all. You can use this
+*                           all. You can use this
 **                          with one single readRxTxStatus call.
 *********************************************************************************************************/
 byte mcp2518fd::checkClearRxStatus(byte *status) {
@@ -2177,9 +2017,9 @@ byte mcp2518fd::checkClearRxStatus(byte *status) {
 /*********************************************************************************************************
 ** Function name:           checkClearTxStatus
 ** Descriptions:            Return specified buffer of first found tx CANINTF
-*status and clears it from parameter.
+*                           status and clears it from parameter.
 **                          Note that this does not affect to chip CANINTF at
-*all. You can use this
+*                           all. You can use this
 **                          with one single readRxTxStatus call.
 *********************************************************************************************************/
 byte mcp2518fd::checkClearTxStatus(byte *status, byte iTxBuf) {
@@ -2190,7 +2030,7 @@ byte mcp2518fd::checkClearTxStatus(byte *status, byte iTxBuf) {
 /*********************************************************************************************************
 ** Function name:           mcpPinMode
 ** Descriptions:            switch supported pins between HiZ, interrupt, output
-*or input
+*                           or input
 *********************************************************************************************************/
 bool mcp2518fd::mcpPinMode(const byte pin, const byte mode) {
   int8_t spiTransferError = 1;
