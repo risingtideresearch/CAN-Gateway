@@ -240,6 +240,26 @@ void setup() {
     io.digitalWrite(canEnable[i], 1);
   }
 
+  // Start Logfile
+  writeFile(SD_MMC, "/log.txt", "START\n");
+  
+  //DEBUG FOR TIMING
+  pinMode(43, OUTPUT);
+  digitalWrite(43, 0);
+
+  // Create pinned task
+  xTaskCreatePinnedToCore(canMonitor,   // Task Function
+                          "CANMonitor", // Task Name
+                          20000,        // Stack Size (words)
+                          NULL,         // Input Param
+                          1,            // Priority
+                          &canTask,     // Task Handle
+                          0);           // Core where the task should run  
+
+  return;
+}
+
+void initCAN() {
   // Start SPI busses
   spi0->begin(14, 12, 13, -1);
   spi1->begin(11, 9, 10, -1);
@@ -277,33 +297,17 @@ void setup() {
       }
     }
   }
-
-  // Start Logfile
-  writeFile(SD_MMC, "/log.txt", "START\n");
-  
-  //DEBUG FOR TIMING
-  pinMode(43, OUTPUT);
-  digitalWrite(43, 0);
-
-  // Create pinned task
-  xTaskCreatePinnedToCore(canMonitor,   // Task Function
-                          "CANMonitor", // Task Name
-                          20000,        // Stack Size (words)
-                          NULL,         // Input Param
-                          1,            // Priority
-                          &canTask,     // Task Handle
-                          0);           // Core where the task should run  
-
-  return;
+  return;  
 }
 
 // This task is pinned to Core 0. Its job is mostly to get interrupted.
 // It also waits for Serial and reports errors. 
 void canMonitor(void *parameter) {
 
+  initCAN();
+
   for (;;) {
-    // Poll all of the CAN transceivers
-  
+    // Poll all of the CAN transceivers  
     for (uint8_t i = 0; i < 6; i++) {
       rx(i);
     } 
@@ -313,12 +317,14 @@ void canMonitor(void *parameter) {
         printErrors();
       }
       // DEBUG: Just to keep an eye on ring buffers during testing
+      /*
       if(SDpos != SDpos_prev || rPtr != rPtr_prev || wPtr != wPtr_prev) {
         Serial.printf("rPtr: %d  wPtr: %d  SDpos: %d \n", rPtr, wPtr, SDpos);
         SDpos_prev = SDpos;
         rPtr_prev = rPtr;
         wPtr_prev = wPtr;
       }
+      */
     }
     if (Serial.available()) {
       debugMenu();
