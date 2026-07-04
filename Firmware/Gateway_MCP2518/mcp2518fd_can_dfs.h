@@ -132,12 +132,8 @@ extern "C" {
 #define cRAMADDR_END (cRAMADDR_START + cRAM_SIZE)
 
 /* SPI Chip Select */
-#define MCP2518fd_SELECT()                                                     \
-  pinMode(SPICS, OUTPUT);                                                      \
-  digitalWrite(SPICS, LOW)
-#define MCP2518fd_UNSELECT()                                                   \
-  pinMode(SPICS, OUTPUT);                                                      \
-  digitalWrite(SPICS, HIGH)
+#define MCP2518fd_SELECT() digitalWrite(SPICS, LOW)
+#define MCP2518fd_UNSELECT() digitalWrite(SPICS, HIGH)
 
 // *****************************************************************************
 // *****************************************************************************
@@ -154,10 +150,10 @@ extern "C" {
 #define MCP2518FD
 
 // Maximum Size of TX/RX Object
-#define MAX_MSG_SIZE 20
+#define MAX_MSG_SIZE 76
 
 // Maximum number of data bytes in message
-#define MAX_DATA_BYTES 8
+#define MAX_DATA_BYTES 64
 
 // *****************************************************************************
 // *****************************************************************************

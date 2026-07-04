@@ -1,23 +1,21 @@
 /* Most of this code are derived from Microchip MCP2518FD SDK */
 #include "mcp2518fd_can.h"
 
-// CAN_CONFIG config;
-CAN_CONFIG config;
-
+static CAN_CONFIG config;
 
 // Receive objects
-CAN_RX_FIFO_CONFIG rxConfig;
-REG_CiFLTOBJ fObj;
-REG_CiMASK mObj;
-CAN_RX_FIFO_EVENT rxFlags;
-CAN_RX_MSGOBJ rxObj;
-uint8_t rxd[MAX_DATA_BYTES];
+static CAN_RX_FIFO_CONFIG rxConfig;
+static REG_CiFLTOBJ fObj;
+static REG_CiMASK mObj;
+static CAN_RX_FIFO_EVENT rxFlags;
+static CAN_RX_MSGOBJ rxObj;
+static uint8_t rxd[MAX_DATA_BYTES];
 
 // Transmit objects
-CAN_TX_FIFO_CONFIG txConfig;
-CAN_TX_FIFO_EVENT txFlags;
-CAN_TX_MSGOBJ txObj;
-uint8_t txd[MAX_DATA_BYTES];
+static CAN_TX_FIFO_CONFIG txConfig;
+static CAN_TX_FIFO_EVENT txFlags;
+static CAN_TX_MSGOBJ txObj;
+static uint8_t txd[MAX_DATA_BYTES];
 
 #define MAX_TXQUEUE_ATTEMPTS 50
 
@@ -48,7 +46,6 @@ uint16_t DRV_CANFDSPI_CalculateCRC16(uint8_t *data, uint16_t size) {
 
   return init;
 }
-
 
 /*********************************************************************************************************
 ** Function name:           begin
@@ -1923,7 +1920,7 @@ byte mcp2518fd::checkError(uint8_t* err_ptr) {
 // **                          Status has to be read with readRxTxStatus.
 // *********************************************************************************************************/
 byte mcp2518fd::mcp2518fd_readMsgBufID(volatile byte *len, volatile byte *buf) {
-  mcp2518fd_ReceiveMessageGet(APP_RX_FIFO, &rxObj, rxd, MAX_DATA_BYTES);
+  mcp2518fd_ReceiveMessageGet(APP_RX_FIFO, &rxObj, rxd, 8);
   ext_flg = rxObj.bF.ctrl.IDE;
   can_id = ext_flg? (rxObj.bF.id.EID | ((uint32_t) rxObj.bF.id.SID << 18))
                   :  rxObj.bF.id.SID;
