@@ -1,5 +1,8 @@
+// FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=enabled,LoopCore=0
+
 #include <SPI.h>
 #include <SparkFun_I2C_Expander_Arduino_Library.h> //https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
+#include <esp_task_wdt.h>
 #include "mcp2518fd_can.h"
 #include "FS.h"
 #include "SD_MMC.h"
@@ -38,14 +41,9 @@ struct CANFrame{
 };
 
 // Buffer to write CAN traffic to
-struct CANFrame bufferCAN[256];
-uint8_t  wPtr = 0;
-uint8_t  rPtr = 0;
-
-// For Debugging
-uint8_t wPtr_prev = 0;
-uint8_t rPtr_prev = 0;
-uint16_t SDpos_prev = 0;
+struct CANFrame bufferCAN[1024];
+uint16_t  wPtr = 0;
+uint16_t  rPtr = 0;
 
 // Buffer for writing to storage
 char bufferSD[1024];
@@ -85,33 +83,37 @@ void ERR(uint8_t errorCode) {
 
 // Get RXMsg from MCP2518 over SPI. Time critical. 
 bool rx(uint8_t channel) {
+
+  CANFrame newFrame;
   
-  // Bail if there's no message in the rxBuf
-  if (CAN_MSGAVAIL != canChannel[channel]->checkReceive()){
+  if (canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data) == 1) {
     return 0;
   }
-
   // Else, get the message
+
+  //digitalWrite(41, 1);
 
   // Still using system time for timestamps,
   // MCP2518 does provide timestamps at the cost of
   // increased SPI payload
   struct timeval tv;
 	gettimeofday(&tv, NULL);
-  CANFrame newFrame;
+
   // This can be optimized. Basically copying a structure that
   // already exists in the lib. Could modify lib to just hand
   // over the struct
   newFrame.channel = channel;
   newFrame.timeSec = tv.tv_sec;
   newFrame.timeuSec = tv.tv_usec;
-  canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data);
   newFrame.rtr = canChannel[channel]->isRemoteRequest();
   newFrame.ext = canChannel[channel]->isExtendedFrame();
   newFrame.id = canChannel[channel]->getCanId();
   bufferCAN[wPtr] = newFrame;
   wPtr++;
+  if (wPtr > 1023) {wPtr = 0;}
   
+  //digitalWrite(41, 0);
+
   return 1;
 }
 
@@ -243,9 +245,11 @@ void setup() {
   // Start Logfile
   writeFile(SD_MMC, "/log.txt", "START\n");
   
-  //DEBUG FOR TIMING
-  pinMode(43, OUTPUT);
-  digitalWrite(43, 0);
+  //DEBUG FLAGS
+  pinMode(41, OUTPUT);
+  digitalWrite(41, 0);
+  pinMode(42, OUTPUT);
+  digitalWrite(42, 0);
 
   // Create pinned task
   xTaskCreatePinnedToCore(canMonitor,   // Task Function
@@ -254,7 +258,7 @@ void setup() {
                           NULL,         // Input Param
                           1,            // Priority
                           &canTask,     // Task Handle
-                          0);           // Core where the task should run  
+                          1);           // Core where the task should run  
 
   return;
 }
@@ -300,9 +304,12 @@ void initCAN() {
   return;  
 }
 
-// This task is pinned to Core 0. Its job is mostly to get interrupted.
+// This task is pinned to Core 1. Its job is mostly to get interrupted.
 // It also waits for Serial and reports errors. 
 void canMonitor(void *parameter) {
+
+  esp_task_wdt_init(10, false); 
+  esp_task_wdt_add(NULL);
 
   initCAN();
 
@@ -311,27 +318,8 @@ void canMonitor(void *parameter) {
     for (uint8_t i = 0; i < 6; i++) {
       rx(i);
     } 
-
-    if (!Serial.available()) {
-      if (errorRegister && VERBOSE_ERR) {
-        printErrors();
-      }
-      // DEBUG: Just to keep an eye on ring buffers during testing
-      /*
-      if(SDpos != SDpos_prev || rPtr != rPtr_prev || wPtr != wPtr_prev) {
-        Serial.printf("rPtr: %d  wPtr: %d  SDpos: %d \n", rPtr, wPtr, SDpos);
-        SDpos_prev = SDpos;
-        rPtr_prev = rPtr;
-        wPtr_prev = wPtr;
-      }
-      */
-    }
-    if (Serial.available()) {
-      debugMenu();
-    }
-    vTaskDelay(xDelay);
+    esp_task_wdt_reset(); 
   }
-
   return;
 }
 
@@ -400,9 +388,11 @@ void debugMenu() {
   return;
 }
 
-// This task is pinned to Core 1. Its job is to move bytes around
+// This task is pinned to Core 0. Its job is to move bytes around
 // and write to the storage. 
 void loop() {
+  //digitalWrite(42, 1);
+  if (rPtr > 1023) {rPtr = 0;}
   if (rPtr != wPtr) {
     char rawtoa[64];
     uint8_t rawidx = 0;
@@ -438,7 +428,7 @@ void loop() {
     }
     bufferSD[SDpos] = '\n';
     SDpos++;     
-  } else {
+  } else {    
     vTaskDelay(xDelay);
   }
 
@@ -454,4 +444,14 @@ void loop() {
     SDpos = 0;
     endLogging = false;
   }
+
+  if (!Serial.available()) {
+    if (errorRegister && VERBOSE_ERR) {
+      printErrors();
+    }
+  }
+  if (Serial.available()) {
+    debugMenu();
+  }  
+  //digitalWrite(42, 0);
 }

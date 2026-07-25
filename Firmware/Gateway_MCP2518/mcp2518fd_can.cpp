@@ -1265,6 +1265,29 @@ int8_t mcp2518fd::mcp2518fd_ReceiveChannelEventGet(CAN_FIFO_CHANNEL channel,
   return spiTransferError;
 }
 
+/*
+int8_t mcp2518fd::mcp2518fd_ReceiveChannelStatusGet(CAN_FIFO_CHANNEL channel,
+                                                    CAN_RX_FIFO_STATUS *status) {
+  uint16_t a;
+  REG_CiFIFOSTA ciFifoSta;
+  int8_t spiTransferError = 0;
+
+  // Read
+  ciFifoSta.word = 0;
+  a = cREGADDR_CiFIFOSTA + (channel * CiFIFO_OFFSET);
+
+  spiTransferError = mcp2518fd_ReadByte(a, &ciFifoSta.byte[0]);
+  if (spiTransferError) {
+    return -1;
+  }
+
+  // Update data
+  *status = (CAN_RX_FIFO_STATUS)(ciFifoSta.byte[0] & 0x0F);
+
+  return spiTransferError;
+}
+*/
+
 int8_t mcp2518fd::mcp2518fd_ReceiveMessageGet(CAN_FIFO_CHANNEL channel,
                                               CAN_RX_MSGOBJ *rxObj,
                                               uint8_t *rxd, uint8_t nBytes) {
@@ -1876,6 +1899,9 @@ byte mcp2518fd::setMode(const byte opMode) {
 byte mcp2518fd::readMsgBufID(byte status, volatile unsigned long *id,
                              volatile byte *ext, volatile byte *rtr,
                              volatile byte *len, volatile byte *buf) {
+
+  byte res = (byte)(status & CAN_RX_FIFO_NOT_EMPTY_EVENT) + 2;
+  if (res != CAN_MSGAVAIL) {return 1;}
 
   byte r = mcp2518fd_readMsgBufID(len, buf);
   if (id)
