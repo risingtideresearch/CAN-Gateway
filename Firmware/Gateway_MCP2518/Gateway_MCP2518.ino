@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <SparkFun_I2C_Expander_Arduino_Library.h> //https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
 #include <esp_task_wdt.h>
+#include <RV3028C7.h>
 #include "mcp2518fd_can.h"
 #include "FS.h"
 #include "SD_MMC.h"
@@ -18,11 +19,14 @@
 #define VERBOSE_ERR true
 uint8_t errorRegister = 0;
 
-// Non-blocking delay period to keep core 0 from panicking 
-const TickType_t xDelay = 15 / portTICK_PERIOD_MS;
-
 // GPIO Expander
 SFE_PCA95XX io(PCA95XX_PCA9534);
+
+// Real-Time Clock
+RV3028C7 rtc;
+
+// Reuseable timeval global
+struct timeval tv;
 
 // Task handles for pinning to separate cores
 TaskHandle_t canTask;
@@ -67,18 +71,42 @@ mcp2518fd *canChannel[] = {CAN0, CAN1, CAN2, CAN3, CAN4, CAN5};
 SPIClass *spi0 = new SPIClass(FSPI);
 SPIClass *spi1 = new SPIClass(HSPI);
 
-// Flag to empty bufferSD to storage even if it's not full
-bool endLogging = false;
 // Lazy flag to break from serial menu loop
 bool exitMenu = false;
 
 // Number of times to attempt intialization of each CAN transceiver on failure
 uint8_t mcpInitRetry = 5; 
 
+// Name of the open logfile
+char openLogfile[20];
+
 // Add an error code to the register for printing in VERBOSE mode
 void ERR(uint8_t errorCode) {
   errorRegister = errorRegister | errorCode;
   return;
+}
+
+// Set the ESP32 system time from the RTC
+bool setTimeFromRTC() {
+  uint32_t rtcTime = rtc.getUnixTimestamp();
+  struct timeval systime;
+  int rc;
+  //Serial.println(rtcTime);
+  systime.tv_sec = rtcTime;
+  systime.tv_usec = 0;
+  rc = settimeofday(&systime, NULL);
+  if (rc == 0) {
+    if (VERBOSE_ERR) {
+      Serial.println("System time set successfully");
+    }
+    return 1;
+  } else {
+    if (VERBOSE_ERR) {
+      Serial.println("System time set failed");
+    }
+    return 0;    
+  }
+  return 0;
 }
 
 // Get RXMsg from MCP2518 over SPI. Time critical. 
@@ -93,10 +121,6 @@ bool rx(uint8_t channel) {
 
   //digitalWrite(41, 1);
 
-  // Still using system time for timestamps,
-  // MCP2518 does provide timestamps at the cost of
-  // increased SPI payload
-  struct timeval tv;
 	gettimeofday(&tv, NULL);
 
   // This can be optimized. Basically copying a structure that
@@ -208,6 +232,7 @@ void printErrors() {
 void setup() {
 
   Serial.begin(921600);
+  // while(!Serial.available()){vTaskDelay(xDelay);}
   Wire.begin(1, 2);
 
   // Assign SD_MMC interface pins
@@ -220,6 +245,7 @@ void setup() {
     }
     return;
   }
+
   uint8_t cardType = SD_MMC.cardType();
 
   if (cardType == CARD_NONE) {
@@ -229,10 +255,17 @@ void setup() {
     return;
   }
 
+  // Initialize the RV-3028-C7 Real Time Clock
+  if (rtc.begin() == false) {
+    if (VERBOSE_ERR) {
+      Serial.println("Real-Time Clock not detected");
+    }
+  }
+
   // Initialize the PCA9554 GPIO expander
   if (io.begin(0x3F) == false) {
     if (VERBOSE_ERR) {
-      Serial.println("PCA95xx not detected");
+      Serial.println("GPIO Expander not detected");
     }
   }
 
@@ -242,8 +275,19 @@ void setup() {
     io.digitalWrite(canEnable[i], 1);
   }
 
+  // Update RTC config
+  uint8_t backupReg = rtc.readByteFromEEPROM(0x37);
+  // Trickle charge enable + Direct switching mode + 3kOhm charge resistance
+  backupReg |= 0b00110100; 
+  rtc.writeByteToEEPROM(0x37, backupReg);
+  //Serial.println(rtc.readByteFromEEPROM(0x37));
+  // Set system time from RTC
+  setTimeFromRTC();
+
   // Start Logfile
-  writeFile(SD_MMC, "/log.txt", "START\n");
+	gettimeofday(&tv, NULL);
+  sprintf(openLogfile, "/log%u.txt", tv.tv_sec);
+  writeFile(SD_MMC, openLogfile, "START\n");
   
   //DEBUG FLAGS
   pinMode(41, OUTPUT);
@@ -253,14 +297,22 @@ void setup() {
 
   // Create pinned task
   xTaskCreatePinnedToCore(canMonitor,   // Task Function
-                          "CANMonitor", // Task Name
+                          "CAN Monitor Task", // Task Name
                           20000,        // Stack Size (words)
                           NULL,         // Input Param
                           1,            // Priority
                           &canTask,     // Task Handle
                           1);           // Core where the task should run  
 
-  return;
+  // Create pinned task
+  xTaskCreatePinnedToCore(appMain,   // Task Function
+                          "Main App Task", // Task Name
+                          20000,        // Stack Size (words)
+                          NULL,         // Input Param
+                          0,            // Priority
+                          &loggingTask,     // Task Handle
+                          0);           // Core where the task should run                            
+
 }
 
 void initCAN() {
@@ -336,33 +388,36 @@ void wait() {
   }  // Empty Serial Buffer
   while (!Serial.available()) {
     delay(200);
+      esp_task_wdt_reset();
+      taskYIELD();  
   }
   return;
 }
 
 // Debug menu. Pauses logging and allows manipulation of MCP2515 and Storage
 void debugMenu() {
-  endLogging = true; // Flag to Core 0 process to dump bufferSD
   exitMenu = false; // Lazy flag to break from menu loop
+  uint32_t setTime;
   for (;;) {
     Serial.println("DEBUG MENU");
     Serial.println("---------------------");
     Serial.println("1) Dump Log");
     Serial.println("2) Delete Log");
     Serial.println("3) Test SD Card");
-    Serial.println("4) Resume Logging");
+    Serial.println("4) Set Time");
+    Serial.println("5) Resume Logging");
     wait();
     ANSI_clear();
     switch (Serial.read()) {
-      case '1':
-        readFile(SD_MMC, "/log.txt");
-        Serial.println("Press Any Key To Exit");
+      case '1': 
+        readFile(SD_MMC, openLogfile);
+        Serial.println("Press Any Key To Return");
         wait();
         ANSI_clear();
         break;
       case '2':
-        deleteFile(SD_MMC, "/log.txt");
-        writeFile(SD_MMC, "/log.txt", "START\n");
+        deleteFile(SD_MMC, openLogfile);
+        writeFile(SD_MMC, openLogfile, "START\n");
         break;
       case '3':
         Serial.println("Attempting to Write to SD");
@@ -370,12 +425,43 @@ void debugMenu() {
         Serial.println("Attempting to Read from SD");
         readFile(SD_MMC, "/test.txt");
         deleteFile(SD_MMC, "/test.txt");
+        Serial.println("Press Any Key To Return");
+        wait();
+        ANSI_clear();
         break;
       case '4':
+        Serial.print("Current Time is: ");
+        //Serial.println(rtc.getCurrentDateTime());
+        Serial.println(rtc.getUnixTimestamp());
+        Serial.println("Enter new unix time:");
+        wait();
+        setTime = strtoul(Serial.readString().c_str(), NULL, 10);
+        if (setTime == 0) {
+          Serial.println("Time will not be changed.");
+          Serial.println("Press Any Key To Return");  
+          wait();
+          ANSI_clear();
+          break;
+        }
+        if (rtc.setUnixTimestamp(setTime, true)) {
+          Serial.print("Time successfully set to: ");
+          Serial.println(rtc.getUnixTimestamp());
+          setTimeFromRTC();
+          gettimeofday(&tv, NULL);
+          Serial.println(tv.tv_sec);
+          Serial.println("Press Any Key To Return");          
+        } else {
+          Serial.print("Failed to set time. Check your formatting.");
+          Serial.println("Press Any Key To Return");  
+        }
+        wait();
+        ANSI_clear();
+        break;
+      case '5':
         exitMenu = true;
         break;
       default:
-        Serial.println("Invalid Command (Try '4' to leave menu?)");
+        Serial.println("Invalid Command (Try '5' to leave menu?)");
         break;
     }
     while (Serial.available()) {
@@ -390,68 +476,76 @@ void debugMenu() {
 
 // This task is pinned to Core 0. Its job is to move bytes around
 // and write to the storage. 
-void loop() {
-  //digitalWrite(42, 1);
-  if (rPtr > 1023) {rPtr = 0;}
-  if (rPtr != wPtr) {
-    char rawtoa[64];
-    uint8_t rawidx = 0;
-    char buf[3];
-    for (uint8_t tmpidx = 0; tmpidx < bufferCAN[rPtr].dlc; tmpidx++) {
-      itoa(bufferCAN[rPtr].data[tmpidx], buf, 16);
-      if (bufferCAN[rPtr].data[tmpidx] < 0x10) {
-        rawtoa[rawidx] = '0';
-        rawidx++;
-        for (uint8_t bufidx = 0; buf[bufidx] != '\0'; bufidx++) {
-          rawtoa[rawidx] = buf[bufidx];
+void appMain(void *parameter) {
+  esp_task_wdt_init(10, false); 
+  esp_task_wdt_add(NULL);
+
+  for (;;) {
+
+    if (rPtr > 1023) {rPtr = 0;}
+    if (rPtr != wPtr) {
+      char rawtoa[64];
+      uint8_t rawidx = 0;
+      char buf[3];
+      for (uint8_t tmpidx = 0; tmpidx < bufferCAN[rPtr].dlc; tmpidx++) {
+        itoa(bufferCAN[rPtr].data[tmpidx], buf, 16);
+        if (bufferCAN[rPtr].data[tmpidx] < 0x10) {
+          rawtoa[rawidx] = '0';
           rawidx++;
-        }
+          for (uint8_t bufidx = 0; buf[bufidx] != '\0'; bufidx++) {
+            rawtoa[rawidx] = buf[bufidx];
+            rawidx++;
+          }
+        } else {
+          for (uint8_t bufidx = 0; buf[bufidx] != '\0'; bufidx++) {
+            rawtoa[rawidx] = buf[bufidx];
+            rawidx++;
+          }        
+        }  
+        memset(buf, 0, sizeof(buf));
+      }
+      rawtoa[rawidx] = '\0';
+      char logEntry[64];
+      if (bufferCAN[rPtr].rtr) {
+        sprintf(logEntry, "(%ld.%ld) can%d %X#R", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id);
       } else {
-        for (uint8_t bufidx = 0; buf[bufidx] != '\0'; bufidx++) {
-          rawtoa[rawidx] = buf[bufidx];
-          rawidx++;
-        }        
-      }  
-      memset(buf, 0, sizeof(buf));
+        sprintf(logEntry, "(%ld.%ld) can%d %X#%s", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id, rawtoa);
+      }
+      rPtr++;
+      for (uint8_t logidx = 0; logEntry[logidx] != '\0'; logidx++) {
+        bufferSD[SDpos] = logEntry[logidx];
+        SDpos++;
+      }
+      bufferSD[SDpos] = '\n';
+      SDpos++;     
+    } else {    
+      esp_task_wdt_reset();
+      taskYIELD();
     }
-    rawtoa[rawidx] = '\0';
-    char logEntry[64];
-    if (bufferCAN[rPtr].rtr) {
-      sprintf(logEntry, "(%ld.%ld) can%d %X#R", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id);
-    } else {
-      sprintf(logEntry, "(%ld.%ld) can%d %X#%s", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id, rawtoa);
-    }
-    rPtr++;
-    for (uint8_t logidx = 0; logEntry[logidx] != '\0'; logidx++) {
-      bufferSD[SDpos] = logEntry[logidx];
-      SDpos++;
-    }
-    bufferSD[SDpos] = '\n';
-    SDpos++;     
-  } else {    
-    vTaskDelay(xDelay);
-  }
 
-  if (SDpos > 512) {
-    appendFile(SD_MMC, "/log.txt", bufferSD);
-    memset(bufferSD, '\0', sizeof(bufferSD));
-    SDpos = 0;
-  }
-
-  if (endLogging) {
-    appendFile(SD_MMC, "/log.txt", bufferSD);
-    memset(bufferSD, '\0', sizeof(bufferSD));
-    SDpos = 0;
-    endLogging = false;
-  }
-
-  if (!Serial.available()) {
-    if (errorRegister && VERBOSE_ERR) {
-      printErrors();
+    if (SDpos > 512) {
+      appendFile(SD_MMC, openLogfile, bufferSD);
+      memset(bufferSD, '\0', sizeof(bufferSD));
+      SDpos = 0;
     }
+
+    if (!Serial.available()) {
+      if (errorRegister && VERBOSE_ERR) {
+        printErrors();
+      }
+    }
+    if (Serial.available()) {
+      appendFile(SD_MMC, openLogfile, bufferSD);
+      memset(bufferSD, '\0', sizeof(bufferSD));
+      SDpos = 0;
+      debugMenu();
+    }  
+
   }
-  if (Serial.available()) {
-    debugMenu();
-  }  
-  //digitalWrite(42, 0);
+}
+
+// The Arduino IDE expects this but it's more convenient to create our own tasks
+// and assign them whatever core/priority we want and just kill this one
+void loop() {
+  vTaskDelete(NULL);
 }
