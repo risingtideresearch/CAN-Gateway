@@ -9,6 +9,12 @@
 #include "SD_MMC.h"
 #include "time.h"
 
+// Storage related parameters
+#define SIZE_CAN_FRAME_BUFFER_IN_FRAMES 1024
+#define SIZE_SDMMC_BUFFER_IN_BYTES 65536
+#define SIZE_SDMMC_CHUNK_WRITE_IN_BYTES 32767
+#define SIZE_MAXIMUM_LOGFILE_IN_MBYTES 200 
+
 // Error printing helpers
 #define ERR_CAN_FAILED_TO_READ_BUFFER_STATUS 0x01
 #define ERR_SD_FAILED_TO_OPEN_FILE 0x02
@@ -45,13 +51,18 @@ struct CANFrame{
 };
 
 // Buffer to write CAN traffic to
-struct CANFrame bufferCAN[1024];
+struct CANFrame bufferCAN[SIZE_CAN_FRAME_BUFFER_IN_FRAMES];
 uint16_t  wPtr = 0;
 uint16_t  rPtr = 0;
 
 // Buffer for writing to storage
-char bufferSD[1024];
+char bufferSD[SIZE_SDMMC_BUFFER_IN_BYTES];
 uint16_t SDpos = 0;
+
+// Calculate the number of chunk writes to approach maximum logfile size
+const uint32_t maxLogSizeChunks = (SIZE_MAXIMUM_LOGFILE_IN_MBYTES*1000000)/SIZE_SDMMC_CHUNK_WRITE_IN_BYTES;
+// Track the number of chunks written to open logfile
+uint32_t chunkWrites = 0;
 
 // Map GPIO Expander pins to CAN EN pins
 uint8_t canEnable[] = {4,5,3,2,1,0}; 
@@ -201,6 +212,15 @@ void deleteFile(fs::FS &fs, const char *path) {
 }
 /***************************/
 
+// Format new filename, open file for writing, reset size counter
+void openNewLog() {
+  gettimeofday(&tv, NULL);
+  sprintf(openLogfile, "/log%u.txt", tv.tv_sec);
+  writeFile(SD_MMC, openLogfile, "START\n");
+  chunkWrites = 0;
+  return;
+}
+
 // Pretty-print the contents of the Error Register to Serial
 void printErrors() {
   if (errorRegister & ERR_CAN_FAILED_TO_READ_BUFFER_STATUS) {
@@ -285,9 +305,7 @@ void setup() {
   setTimeFromRTC();
 
   // Start Logfile
-	gettimeofday(&tv, NULL);
-  sprintf(openLogfile, "/log%u.txt", tv.tv_sec);
-  writeFile(SD_MMC, openLogfile, "START\n");
+  openNewLog();
   
   //DEBUG FLAGS
   pinMode(41, OUTPUT);
@@ -417,7 +435,7 @@ void debugMenu() {
         break;
       case '2':
         deleteFile(SD_MMC, openLogfile);
-        writeFile(SD_MMC, openLogfile, "START\n");
+        openNewLog();
         break;
       case '3':
         Serial.println("Attempting to Write to SD");
@@ -482,7 +500,7 @@ void appMain(void *parameter) {
 
   for (;;) {
 
-    if (rPtr > 1023) {rPtr = 0;}
+    if (rPtr == SIZE_CAN_FRAME_BUFFER_IN_FRAMES) {rPtr = 0;}
     if (rPtr != wPtr) {
       char rawtoa[64];
       uint8_t rawidx = 0;
@@ -523,9 +541,16 @@ void appMain(void *parameter) {
       taskYIELD();
     }
 
-    if (SDpos > 512) {
+    if (SDpos > SIZE_SDMMC_CHUNK_WRITE_IN_BYTES) {
+      chunkWrites++;
       appendFile(SD_MMC, openLogfile, bufferSD);
       memset(bufferSD, '\0', sizeof(bufferSD));
+      // If filesize is getting too big (> SIZE_MAXIMUM_LOGFILE_IN_MBYTES)
+      // start a new one
+      if (chunkWrites > maxLogSizeChunks) {
+        chunkWrites = 0;
+        openNewLog();
+      }
       SDpos = 0;
     }
 

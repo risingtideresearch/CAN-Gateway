@@ -1737,7 +1737,7 @@ uint8_t mcp2518fd::mcp2518fd_init(uint32_t speedset, const byte clock) {
 
   // Setup RX FIFO
   mcp2518fd_ReceiveChannelConfigureObjectReset(&rxConfig);
-  rxConfig.FifoSize = 15;
+  rxConfig.FifoSize = 30;
   rxConfig.PayLoadSize = CAN_PLSIZE_64;
   mcp2518fd_ReceiveChannelConfigure(APP_RX_FIFO, &rxConfig);
 
