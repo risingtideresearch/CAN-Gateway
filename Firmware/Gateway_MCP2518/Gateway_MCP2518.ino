@@ -262,12 +262,12 @@ void printErrors() {
 void printRxOverflow() {
   size_t now = millis();
   if (canRxOverflowInterval > 0 && canRxOverflowLastLog - now > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS) {
+    uint32_t intervalCount = canRxOverflowInterval.exchange(0);
+    canRxOverflowLastLog = now;
     Serial.print("RX Queue Overflow recent=");
-    Serial.print(canRxOverflowInterval);
+    Serial.print(intervalCount);
     Serial.print(" total=");
     Serial.println(canRxOverflowCount);
-    canRxOverflowInterval = 0;
-    canRxOverflowLastLog = now;
   }
 }
 
