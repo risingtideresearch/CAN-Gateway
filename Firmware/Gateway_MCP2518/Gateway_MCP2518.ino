@@ -131,14 +131,14 @@ bool setTimeFromRTC() {
 // Get RXMsg from MCP2518 over SPI. Time critical. 
 bool rx(uint8_t channel) {
 
+  //digitalWrite(41, 1);
+
   CANFrame newFrame;
 
   if (canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data) == 1) {
     return 0;
   }
   // Else, get the message
-
-  //digitalWrite(41, 1);
 
 	gettimeofday(&tv, NULL);
 
@@ -157,6 +157,7 @@ bool rx(uint8_t channel) {
     canRxOverflowCount++;
     canRxOverflowInterval++;
   }
+  
   //digitalWrite(41, 0);
 
   return 1;
@@ -331,11 +332,17 @@ void setup() {
   openNewLog();
   
   //DEBUG FLAGS
+  /*
   pinMode(41, OUTPUT);
   digitalWrite(41, 0);
   pinMode(42, OUTPUT);
   digitalWrite(42, 0);
-
+  pinMode(45, OUTPUT);
+  digitalWrite(45, 0);
+  pinMode(46, OUTPUT);
+  digitalWrite(46, 0);
+  */
+  
   // Create CAN RX buffer queue
   canRxQueue = xQueueCreate(SIZE_CAN_RX_QUEUE_IN_FRAMES, sizeof(CANFrame));
 
@@ -525,10 +532,12 @@ void appMain(void *parameter) {
   esp_task_wdt_add(NULL);
 
   for (;;) {
+    //digitalWrite(42, 1);
     CANFrame frame;
     // Receive a frame from other task. Blocks up to TIMEOUT_SD_FLUSH_MS.
     bool new_frame = xQueueReceive(canRxQueue, &frame, pdMS_TO_TICKS(TIMEOUT_SD_FLUSH_MS));
     if (new_frame) {
+      digitalWrite(45, 1);
       char rawtoa[64];
       uint8_t rawidx = 0;
       char buf[3];
@@ -562,12 +571,14 @@ void appMain(void *parameter) {
       }
       bufferSD[SDpos] = '\n';
       SDpos++;
+      //digitalWrite(45, 0);
     }
 
     // Flush to SD if either of:
     // - SIZE_SDMMC_CHUNK_WRITE_IN_BYTES waiting to write
     // - No message received for TIMEOUT_SD_FLUSH_MS and there is anything to write
     if (SDpos > SIZE_SDMMC_CHUNK_WRITE_IN_BYTES || (!new_frame && SDpos > 0)) {
+      //digitalWrite(46, 1);
       chunkWrites++;
       appendFile(SD_MMC, openLogfile, bufferSD);
       memset(bufferSD, '\0', sizeof(bufferSD));
@@ -578,22 +589,24 @@ void appMain(void *parameter) {
         openNewLog();
       }
       SDpos = 0;
+      //digitalWrite(46, 0);
     }
 
     esp_task_wdt_reset();
-  }
-
-  if (!Serial.available()) {
-    if (errorRegister && VERBOSE_ERR) {
-      printErrors();
+  
+    if (!Serial.available()) {
+      if (errorRegister && VERBOSE_ERR) {
+        printErrors();
+      }
+      printRxOverflow();
     }
-    printRxOverflow();
-  }
-  if (Serial.available()) {
-    appendFile(SD_MMC, openLogfile, bufferSD);
-    memset(bufferSD, '\0', sizeof(bufferSD));
-    SDpos = 0;
-    debugMenu();
+    if (Serial.available()) {
+      appendFile(SD_MMC, openLogfile, bufferSD);
+      memset(bufferSD, '\0', sizeof(bufferSD));
+      SDpos = 0;
+      debugMenu();
+    }
+    //digitalWrite(42, 0);
   }
 }
 
