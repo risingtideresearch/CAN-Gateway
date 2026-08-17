@@ -1,8 +1,10 @@
 // FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=enabled,LoopCore=0
 
+#include <atomic>
 #include <SPI.h>
 #include <SparkFun_I2C_Expander_Arduino_Library.h> //https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
 #include <esp_task_wdt.h>
+#include <freertos/queue.h>
 #include <RV3028C7.h>
 #include "mcp2518fd_can.h"
 #include "FS.h"
@@ -10,7 +12,7 @@
 #include "time.h"
 
 // Storage related parameters
-#define SIZE_CAN_FRAME_BUFFER_IN_FRAMES 1024
+#define SIZE_CAN_RX_QUEUE_IN_FRAMES 1024
 #define SIZE_SDMMC_BUFFER_IN_BYTES 65536
 #define SIZE_SDMMC_CHUNK_WRITE_IN_BYTES 32767
 #define SIZE_MAXIMUM_LOGFILE_IN_MBYTES 200 
@@ -24,6 +26,10 @@
 #define ERR_CAN_FAILED_TO_READ_REGISTER 0x12
 #define VERBOSE_ERR true
 uint8_t errorRegister = 0;
+
+#define CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS 10000  // Log about queue overflow at most this often
+
+#define TIMEOUT_SD_FLUSH_MS 50 // Flush a partial buffer to SD if the bus is quiet for this many milliseconds
 
 // GPIO Expander
 SFE_PCA95XX io(PCA95XX_PCA9534);
@@ -50,10 +56,12 @@ struct CANFrame{
   bool  ext;
 };
 
-// Buffer to write CAN traffic to
-struct CANFrame bufferCAN[SIZE_CAN_FRAME_BUFFER_IN_FRAMES];
-uint16_t  wPtr = 0;
-uint16_t  rPtr = 0;
+// Queue for incoming CAN traffic to write CAN traffic to (queue of struct CANFrame)
+QueueHandle_t canRxQueue;
+
+uint32_t canRxOverflowCount;    // Number of times canRxQueue has overflowed since boot
+std::atomic<uint32_t> canRxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
+uint32_t canRxOverflowLastLog;  // Timestamp of the last time we logged overflows (limited to CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS)
 
 // Buffer for writing to storage
 char bufferSD[SIZE_SDMMC_BUFFER_IN_BYTES];
@@ -123,14 +131,14 @@ bool setTimeFromRTC() {
 // Get RXMsg from MCP2518 over SPI. Time critical. 
 bool rx(uint8_t channel) {
 
+  //digitalWrite(41, 1);
+
   CANFrame newFrame;
-  
+
   if (canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data) == 1) {
     return 0;
   }
   // Else, get the message
-
-  //digitalWrite(41, 1);
 
 	gettimeofday(&tv, NULL);
 
@@ -143,9 +151,12 @@ bool rx(uint8_t channel) {
   newFrame.rtr = canChannel[channel]->isRemoteRequest();
   newFrame.ext = canChannel[channel]->isExtendedFrame();
   newFrame.id = canChannel[channel]->getCanId();
-  bufferCAN[wPtr] = newFrame;
-  wPtr++;
-  if (wPtr > 1023) {wPtr = 0;}
+
+  if (!xQueueSend(canRxQueue, &newFrame, 0)) {
+    // CAN RX queue is full, the other task will log this as a warning
+    canRxOverflowCount++;
+    canRxOverflowInterval++;
+  }
   
   //digitalWrite(41, 0);
 
@@ -248,6 +259,19 @@ void printErrors() {
   return;
 }
 
+// Periodically print a warning if any CAN RX messages were dropped
+void printRxOverflow() {
+  size_t now = millis();
+  if (canRxOverflowInterval > 0 && canRxOverflowLastLog - now > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS) {
+    uint32_t intervalCount = canRxOverflowInterval.exchange(0);
+    canRxOverflowLastLog = now;
+    Serial.print("RX Queue Overflow recent=");
+    Serial.print(intervalCount);
+    Serial.print(" total=");
+    Serial.println(canRxOverflowCount);
+  }
+}
+
 // Initialize ALL THE THINGS
 void setup() {
 
@@ -308,10 +332,19 @@ void setup() {
   openNewLog();
   
   //DEBUG FLAGS
+  /*
   pinMode(41, OUTPUT);
   digitalWrite(41, 0);
   pinMode(42, OUTPUT);
   digitalWrite(42, 0);
+  pinMode(45, OUTPUT);
+  digitalWrite(45, 0);
+  pinMode(46, OUTPUT);
+  digitalWrite(46, 0);
+  */
+  
+  // Create CAN RX buffer queue
+  canRxQueue = xQueueCreate(SIZE_CAN_RX_QUEUE_IN_FRAMES, sizeof(CANFrame));
 
   // Create pinned task
   xTaskCreatePinnedToCore(canMonitor,   // Task Function
@@ -388,7 +421,7 @@ void canMonitor(void *parameter) {
     for (uint8_t i = 0; i < 6; i++) {
       rx(i);
     } 
-    esp_task_wdt_reset(); 
+    esp_task_wdt_reset();
   }
   return;
 }
@@ -492,22 +525,25 @@ void debugMenu() {
   return;
 }
 
-// This task is pinned to Core 0. Its job is to move bytes around
-// and write to the storage. 
+// This task is pinned to Core 0. Its job is to read CAN frames
+// from the buffer queue, format them, and write to the storage.
 void appMain(void *parameter) {
   esp_task_wdt_init(10, false); 
   esp_task_wdt_add(NULL);
 
   for (;;) {
-
-    if (rPtr == SIZE_CAN_FRAME_BUFFER_IN_FRAMES) {rPtr = 0;}
-    if (rPtr != wPtr) {
+    //digitalWrite(42, 1);
+    CANFrame frame;
+    // Receive a frame from other task. Blocks up to TIMEOUT_SD_FLUSH_MS.
+    bool new_frame = xQueueReceive(canRxQueue, &frame, pdMS_TO_TICKS(TIMEOUT_SD_FLUSH_MS));
+    if (new_frame) {
+      digitalWrite(45, 1);
       char rawtoa[64];
       uint8_t rawidx = 0;
       char buf[3];
-      for (uint8_t tmpidx = 0; tmpidx < bufferCAN[rPtr].dlc; tmpidx++) {
-        itoa(bufferCAN[rPtr].data[tmpidx], buf, 16);
-        if (bufferCAN[rPtr].data[tmpidx] < 0x10) {
+      for (uint8_t tmpidx = 0; tmpidx < frame.dlc; tmpidx++) {
+        itoa(frame.data[tmpidx], buf, 16);
+        if (frame.data[tmpidx] < 0x10) {
           rawtoa[rawidx] = '0';
           rawidx++;
           for (uint8_t bufidx = 0; buf[bufidx] != '\0'; bufidx++) {
@@ -524,24 +560,25 @@ void appMain(void *parameter) {
       }
       rawtoa[rawidx] = '\0';
       char logEntry[64];
-      if (bufferCAN[rPtr].rtr) {
-        sprintf(logEntry, "(%ld.%ld) can%d %X#R", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id);
+      if (frame.rtr) {
+        sprintf(logEntry, "(%ld.%ld) can%d %X#R", frame.timeSec, frame.timeuSec, frame.channel, frame.id);
       } else {
-        sprintf(logEntry, "(%ld.%ld) can%d %X#%s", bufferCAN[rPtr].timeSec, bufferCAN[rPtr].timeuSec, bufferCAN[rPtr].channel, bufferCAN[rPtr].id, rawtoa);
+        sprintf(logEntry, "(%ld.%ld) can%d %X#%s", frame.timeSec, frame.timeuSec, frame.channel, frame.id, rawtoa);
       }
-      rPtr++;
       for (uint8_t logidx = 0; logEntry[logidx] != '\0'; logidx++) {
         bufferSD[SDpos] = logEntry[logidx];
         SDpos++;
       }
       bufferSD[SDpos] = '\n';
-      SDpos++;     
-    } else {    
-      esp_task_wdt_reset();
-      taskYIELD();
+      SDpos++;
+      //digitalWrite(45, 0);
     }
 
-    if (SDpos > SIZE_SDMMC_CHUNK_WRITE_IN_BYTES) {
+    // Flush to SD if either of:
+    // - SIZE_SDMMC_CHUNK_WRITE_IN_BYTES waiting to write
+    // - No message received for TIMEOUT_SD_FLUSH_MS and there is anything to write
+    if (SDpos > SIZE_SDMMC_CHUNK_WRITE_IN_BYTES || (!new_frame && SDpos > 0)) {
+      //digitalWrite(46, 1);
       chunkWrites++;
       appendFile(SD_MMC, openLogfile, bufferSD);
       memset(bufferSD, '\0', sizeof(bufferSD));
@@ -552,20 +589,24 @@ void appMain(void *parameter) {
         openNewLog();
       }
       SDpos = 0;
+      //digitalWrite(46, 0);
     }
 
+    esp_task_wdt_reset();
+  
     if (!Serial.available()) {
       if (errorRegister && VERBOSE_ERR) {
         printErrors();
       }
+      printRxOverflow();
     }
     if (Serial.available()) {
       appendFile(SD_MMC, openLogfile, bufferSD);
       memset(bufferSD, '\0', sizeof(bufferSD));
       SDpos = 0;
       debugMenu();
-    }  
-
+    }
+    //digitalWrite(42, 0);
   }
 }
 
