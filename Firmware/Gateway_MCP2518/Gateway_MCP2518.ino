@@ -572,6 +572,16 @@ void debugMenu() {
   return;
 }
 
+void stringToSDBuffer(char* inString){
+  for (uint8_t idx = 0; inString[idx] != '\0'; idx++) {
+    bufferSD[SDpos] = inString[idx];
+    SDpos++;
+  }
+  bufferSD[SDpos] = '\n';
+  SDpos++;
+  return;
+}
+
 // This task is pinned to Core 0. Its job is to read CAN frames
 // from the buffer queue, format them, and write to the storage.
 void appMain(void *parameter) {
@@ -612,12 +622,7 @@ void appMain(void *parameter) {
       } else {
         sprintf(logEntry, "(%ld.%ld) can%d %X#%s", frame.timeSec, frame.timeuSec, frame.channel, frame.id, rawtoa);
       }
-      for (uint8_t logidx = 0; logEntry[logidx] != '\0'; logidx++) {
-        bufferSD[SDpos] = logEntry[logidx];
-        SDpos++;
-      }
-      bufferSD[SDpos] = '\n';
-      SDpos++;
+      stringToSDBuffer(logEntry);
       //digitalWrite(45, 0);
     }
 
@@ -645,18 +650,26 @@ void appMain(void *parameter) {
     }
 
     if (freshCANErr) {
+      char errString[64];
+      gettimeofday(&tv, NULL);
       for (uint8_t i = 0; i < 6; i++) {
         // RX PASSIVE
         if (busErrorFlags[i] & 0x08) {
           ERR(ERR_CAN_RX_PASSIVE);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to rx passive state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);
         }
         // TX PASSIVE
         if (busErrorFlags[i] & 0x10) {
           ERR(ERR_CAN_TX_PASSIVE);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to tx passive state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);          
         }
         // BUS OFF 
         if (busErrorFlags[i] & 0x20) {
           ERR(ERR_CAN_BUSS_OFF);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to bus off state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);          
         }        
       } 
       freshCANErr = 0;
