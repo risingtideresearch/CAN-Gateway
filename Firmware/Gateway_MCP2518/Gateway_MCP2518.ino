@@ -1,4 +1,23 @@
 // FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=enabled,LoopCore=0
+// Arduino IDE Board Settings
+// https://github.com/espressif/arduino-esp32
+// Board: "ESP32S3 Dev Module"
+// USB CDC On Boot: "Enabled"
+// CPU Frequency: "240MHz (WiFi)"
+// Core Debug Level: None
+// USB DFU On Boot: "Disabled"
+// Erase All Flash Before Sketch Upload: "Disabled"
+// Events Run On: "Core 1"
+// Flash Mode: "QIO 80MHz"
+// Flash Size: "16MB (128Mb)"
+// JTAG Adapter: "Disabled"
+// Arduino Runs On: "Core 0"
+// USB Firmware MSC On Boot: "Disabled"
+// Partition Scheme: "Default 4MB with spiffs (1.2MB APP/1.5MB SPIFFS)"
+// PSRAM: "QSPI PSRAM"
+// Upload Mode: "UART 0 / Hardware CDC"
+// Upload Speed: "921600"
+// USB Mode: "Hardware CDC and JTAG"
 
 #include <atomic>
 #include <SPI.h>
@@ -15,7 +34,7 @@
 #define SIZE_CAN_RX_QUEUE_IN_FRAMES 1024
 #define SIZE_SDMMC_BUFFER_IN_BYTES 65536
 #define SIZE_SDMMC_CHUNK_WRITE_IN_BYTES 32767
-#define SIZE_MAXIMUM_LOGFILE_IN_MBYTES 200 
+#define SIZE_MAXIMUM_LOGFILE_IN_MBYTES 200
 
 // Error printing helpers
 #define ERR_CAN_FAILED_TO_READ_BUFFER_STATUS 0x01
@@ -23,11 +42,20 @@
 #define ERR_SD_FAILED_TO_WRITE_FILE 0x04
 #define ERR_SD_FAILED_TO_DELETE_FILE 0x08
 #define ERR_LOG_BUFFER_WRAP 0x10
-#define ERR_CAN_FAILED_TO_READ_REGISTER 0x12
+#define ERR_CAN_FAILED_TO_READ_REGISTER 0x20
+#define ERR_CAN_RX_PASSIVE 0x40
+#define ERR_CAN_TX_PASSIVE 0x80
+#define ERR_CAN_BUS_OFF 0x100
 #define VERBOSE_ERR true
-uint8_t errorRegister = 0;
+uint16_t errorRegister = 0;
+uint8_t busErrorFlags[6];
 
-#define CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS 10000  // Log about queue overflow at most this often
+#define CAN_ERR_CHECK_INTERVAL_SECONDS 15 // Check CAN controllers for bus errors at most this often
+uint64_t lastCheckCANErr = 0;
+bool checkCANErr = 0; // Put the burden of time_t comparisons on core 0 task and use flag to alert core 1 task
+bool freshCANErr = 0;
+
+#define CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS 10  // Log about queue overflow at most this often
 
 #define TIMEOUT_SD_FLUSH_MS 50 // Flush a partial buffer to SD if the bus is quiet for this many milliseconds
 
@@ -61,7 +89,7 @@ QueueHandle_t canRxQueue;
 
 uint32_t canRxOverflowCount;    // Number of times canRxQueue has overflowed since boot
 std::atomic<uint32_t> canRxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
-uint32_t canRxOverflowLastLog;  // Timestamp of the last time we logged overflows (limited to CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS)
+uint64_t canRxOverflowLastLog;  // Timestamp of the last time we logged overflows
 
 // Buffer for writing to storage
 char bufferSD[SIZE_SDMMC_BUFFER_IN_BYTES];
@@ -100,7 +128,7 @@ uint8_t mcpInitRetry = 5;
 char openLogfile[20];
 
 // Add an error code to the register for printing in VERBOSE mode
-void ERR(uint8_t errorCode) {
+void ERR(uint16_t errorCode) {
   errorRegister = errorRegister | errorCode;
   return;
 }
@@ -126,6 +154,13 @@ bool setTimeFromRTC() {
     return 0;    
   }
   return 0;
+}
+
+void checkCANErrors(uint8_t channel) {
+  byte errorFlags;
+  canChannel[channel]->checkError(&errorFlags);
+  busErrorFlags[channel] = errorFlags;
+  return;
 }
 
 // Get RXMsg from MCP2518 over SPI. Time critical. 
@@ -235,9 +270,7 @@ void openNewLog() {
 // Pretty-print the contents of the Error Register to Serial
 void printErrors() {
   if (errorRegister & ERR_CAN_FAILED_TO_READ_BUFFER_STATUS) {
-    Serial.println(
-        "MCP2515 interrupt fired but no buffer flags were read. Possible SPI "
-        "Error.");
+    Serial.println("No buffer flags were read. Possible SPI Error.");
   }
   if (errorRegister & ERR_SD_FAILED_TO_OPEN_FILE) {
     Serial.println("Failed to open file on storage.");
@@ -252,18 +285,45 @@ void printErrors() {
     Serial.println("Log buffer has wrapped around.");
   }
   if (errorRegister & ERR_CAN_FAILED_TO_READ_REGISTER) {
-    Serial.println("Register read from MCP2515 was not as expected. Possible "
-    "SPI Error.");
+    Serial.println("Register read from MCP2518 was not as expected. Possible SPI Error.");
   }
+  if (errorRegister & ERR_CAN_RX_PASSIVE) {
+    for (uint8_t i = 0; i < 6; i++) {
+      if (busErrorFlags[i] & 0x08) {
+        Serial.print("Can controller ");
+        Serial.print(i);
+        Serial.println(" went to RX Passive state.");
+      }
+    }
+  }
+  if (errorRegister & ERR_CAN_TX_PASSIVE) {
+    for (uint8_t i = 0; i < 6; i++) {
+      if (busErrorFlags[i] & 0x10) {
+        Serial.print("Can controller ");
+        Serial.print(i);
+        Serial.println(" went to TX Passive state.");
+      }
+    } 
+  }
+  if (errorRegister & ERR_CAN_BUS_OFF) {
+    for (uint8_t i = 0; i < 6; i++) {
+      if (busErrorFlags[i] & 0x20) {
+        Serial.print("Can controller ");
+        Serial.print(i);
+        Serial.println(" went to Bus Off state.");
+      }
+    }
+  }      
   errorRegister = 0;
   return;
 }
 
 // Periodically print a warning if any CAN RX messages were dropped
 void printRxOverflow() {
-  size_t now = millis();
-  if (canRxOverflowInterval > 0 && canRxOverflowLastLog - now > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_MS) {
-    uint32_t intervalCount = canRxOverflowInterval.exchange(0);
+  gettimeofday(&tv, NULL);
+  uint64_t now = tv.tv_sec;
+  if (canRxOverflowInterval > 0 && canRxOverflowLastLog - now > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS) {
+    uint64_t intervalCount = canRxOverflowInterval.exchange(0);
     canRxOverflowLastLog = now;
     Serial.print("RX Queue Overflow recent=");
     Serial.print(intervalCount);
@@ -407,8 +467,7 @@ void initCAN() {
   return;  
 }
 
-// This task is pinned to Core 1. Its job is mostly to get interrupted.
-// It also waits for Serial and reports errors. 
+// This task is pinned to Core 1.
 void canMonitor(void *parameter) {
 
   esp_task_wdt_init(10, false); 
@@ -421,6 +480,13 @@ void canMonitor(void *parameter) {
     for (uint8_t i = 0; i < 6; i++) {
       rx(i);
     } 
+    if (checkCANErr) {
+      for (uint8_t i = 0; i < 6; i++) {
+        checkCANErrors(i);
+      }   
+      checkCANErr = 0;
+      freshCANErr = 1;
+    }
     esp_task_wdt_reset();
   }
   return;
@@ -525,6 +591,16 @@ void debugMenu() {
   return;
 }
 
+void stringToSDBuffer(char* inString){
+  for (uint8_t idx = 0; inString[idx] != '\0'; idx++) {
+    bufferSD[SDpos] = inString[idx];
+    SDpos++;
+  }
+  bufferSD[SDpos] = '\n';
+  SDpos++;
+  return;
+}
+
 // This task is pinned to Core 0. Its job is to read CAN frames
 // from the buffer queue, format them, and write to the storage.
 void appMain(void *parameter) {
@@ -565,12 +641,7 @@ void appMain(void *parameter) {
       } else {
         sprintf(logEntry, "(%ld.%ld) can%d %X#%s", frame.timeSec, frame.timeuSec, frame.channel, frame.id, rawtoa);
       }
-      for (uint8_t logidx = 0; logEntry[logidx] != '\0'; logidx++) {
-        bufferSD[SDpos] = logEntry[logidx];
-        SDpos++;
-      }
-      bufferSD[SDpos] = '\n';
-      SDpos++;
+      stringToSDBuffer(logEntry);
       //digitalWrite(45, 0);
     }
 
@@ -592,8 +663,39 @@ void appMain(void *parameter) {
       //digitalWrite(46, 0);
     }
 
+    gettimeofday(&tv, NULL);
+    if (lastCheckCANErr - tv.tv_sec > CAN_ERR_CHECK_INTERVAL_SECONDS) {
+      checkCANErr = 1;
+    }
+
+    if (freshCANErr) {
+      char errString[64];
+      gettimeofday(&tv, NULL);
+      for (uint8_t i = 0; i < 6; i++) {
+        // RX PASSIVE
+        if (busErrorFlags[i] & 0x08) {
+          ERR(ERR_CAN_RX_PASSIVE);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to rx passive state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);
+        }
+        // TX PASSIVE
+        if (busErrorFlags[i] & 0x10) {
+          ERR(ERR_CAN_TX_PASSIVE);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to tx passive state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);          
+        }
+        // BUS OFF 
+        if (busErrorFlags[i] & 0x20) {
+          ERR(ERR_CAN_BUSS_OFF);
+          sprintf(errString, "(%ld.%ld) ERR:can%d went to bus off state", tv.tv_sec, tv.tv_usec, i);
+          stringToSDBuffer(errString);          
+        }        
+      } 
+      freshCANErr = 0;
+    }
+
     esp_task_wdt_reset();
-  
+
     if (!Serial.available()) {
       if (errorRegister && VERBOSE_ERR) {
         printErrors();
