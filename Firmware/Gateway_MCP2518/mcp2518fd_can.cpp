@@ -1757,10 +1757,10 @@ uint8_t mcp2518fd::mcp2518fd_init(uint32_t speedset, const byte clock) {
 
   // Setup Transmit and Receive Interrupts
   mcp2518fd_GpioModeConfigure(GPIO_MODE_INT, GPIO_MODE_INT);
-#ifdef APP_USE_TX_INT
-  mcp2518fd_TransmitChannelEventEnable(APP_TX_FIFO, CAN_TX_FIFO_NOT_FULL_EVENT);
-#endif
-  mcp2518fd_ReceiveChannelEventEnable(APP_RX_FIFO, CAN_RX_FIFO_NOT_EMPTY_EVENT);
+//#ifdef APP_USE_TX_INT
+  mcp2518fd_TransmitChannelEventEnable(APP_TX_FIFO, CAN_TX_FIFO_ATTEMPTS_EXHAUSTED_EVENT);
+//#endif
+  mcp2518fd_ReceiveChannelEventEnable(APP_RX_FIFO, CAN_RX_FIFO_OVERFLOW_EVENT);
   mcp2518fd_ModuleEventEnable((CAN_MODULE_EVENT)(CAN_TX_EVENT | CAN_RX_EVENT));
 
   // Select Normal Mode
