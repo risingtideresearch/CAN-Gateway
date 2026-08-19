@@ -120,6 +120,10 @@ SPIClass *spi1 = new SPIClass(HSPI);
 
 // Lazy flag to break from serial menu loop
 bool exitMenu = false;
+bool debugMenuActive = false;
+
+typedef enum {CAN_TO_SDMMC, CAN_TO_SERIAL} CAN_TRAFFIC_FLOW;
+CAN_TRAFFIC_FLOW canFlow = CAN_TO_SDMMC;
 
 // Number of times to attempt intialization of each CAN transceiver on failure
 uint8_t mcpInitRetry = 5; 
@@ -424,6 +428,9 @@ void setup() {
                           &loggingTask,     // Task Handle
                           0);           // Core where the task should run                            
 
+  esp_task_wdt_init(10, false); 
+  esp_task_wdt_add(loggingTask);
+
 }
 
 void initCAN() {
@@ -503,11 +510,9 @@ void wait() {
   while (Serial.available()) {
     Serial.read();
   }  // Empty Serial Buffer
-  while (!Serial.available()) {
-    delay(200);
-      esp_task_wdt_reset();
-      taskYIELD();  
-  }
+  debugMenuActive = true;
+  appMain(NULL);
+  debugMenuActive = false;
   return;
 }
 
@@ -518,11 +523,12 @@ void debugMenu() {
   for (;;) {
     Serial.println("DEBUG MENU");
     Serial.println("---------------------");
-    Serial.println("1) Dump Log");
-    Serial.println("2) Delete Log");
-    Serial.println("3) Test SD Card");
-    Serial.println("4) Set Time");
-    Serial.println("5) Resume Logging");
+    Serial.println("1) Dump Current Log to Serial");
+    Serial.println("2) Delete Current Log");
+    Serial.println("3) Test SD Card Read/Write");
+    Serial.println("4) Set System Time");
+    Serial.println("5) Live CAN Traffic");
+    Serial.println("6) Exit Debug Menu");
     wait();
     ANSI_clear();
     switch (Serial.read()) {
@@ -530,11 +536,17 @@ void debugMenu() {
         readFile(SD_MMC, openLogfile);
         Serial.println("Press Any Key To Return");
         wait();
+        Serial.read(); // Throw away the "any key"
         ANSI_clear();
         break;
       case '2':
         deleteFile(SD_MMC, openLogfile);
         openNewLog();
+        Serial.println("Attempting to Delete Log and open New Log...");        
+        Serial.println("Press Any Key To Return");
+        wait();
+        Serial.read(); // Throw away the "any key"
+        ANSI_clear();        
         break;
       case '3':
         Serial.println("Attempting to Write to SD");
@@ -544,6 +556,7 @@ void debugMenu() {
         deleteFile(SD_MMC, "/test.txt");
         Serial.println("Press Any Key To Return");
         wait();
+        Serial.read(); // Throw away the "any key"
         ANSI_clear();
         break;
       case '4':
@@ -557,6 +570,7 @@ void debugMenu() {
           Serial.println("Time will not be changed.");
           Serial.println("Press Any Key To Return");  
           wait();
+          Serial.read(); // Throw away the "any key"
           ANSI_clear();
           break;
         }
@@ -572,13 +586,27 @@ void debugMenu() {
           Serial.println("Press Any Key To Return");  
         }
         wait();
+        Serial.read(); // Throw away the "any key"
         ANSI_clear();
         break;
       case '5':
+        Serial.println("Logging will be suspended during Live View");
+        Serial.println("Press Any Key To Continue");  
+        Serial.println("Press again at any time to Exit Live View");
+        wait();
+        Serial.read(); // Throw away the "any key"
+        canFlow = CAN_TO_SERIAL;
+        wait();
+        Serial.read(); // Throw away the "any key"
+        ANSI_clear();
+        canFlow = CAN_TO_SDMMC;      
+        openNewLog();
+        break;
+      case '6':
         exitMenu = true;
         break;
       default:
-        Serial.println("Invalid Command (Try '5' to leave menu?)");
+        Serial.println("Invalid Command (Try '6' to leave menu?)");
         break;
     }
     while (Serial.available()) {
@@ -604,8 +632,6 @@ void stringToSDBuffer(char* inString){
 // This task is pinned to Core 0. Its job is to read CAN frames
 // from the buffer queue, format them, and write to the storage.
 void appMain(void *parameter) {
-  esp_task_wdt_init(10, false); 
-  esp_task_wdt_add(NULL);
 
   for (;;) {
     //digitalWrite(42, 1);
@@ -641,7 +667,11 @@ void appMain(void *parameter) {
       } else {
         sprintf(logEntry, "(%ld.%ld) can%d %X#%s", frame.timeSec, frame.timeuSec, frame.channel, frame.id, rawtoa);
       }
-      stringToSDBuffer(logEntry);
+      if (canFlow == CAN_TO_SDMMC) {
+        stringToSDBuffer(logEntry);
+      } else if (canFlow == CAN_TO_SERIAL) {
+        Serial.println(logEntry);
+      } 
       //digitalWrite(45, 0);
     }
 
@@ -686,7 +716,7 @@ void appMain(void *parameter) {
         }
         // BUS OFF 
         if (busErrorFlags[i] & 0x20) {
-          ERR(ERR_CAN_BUSS_OFF);
+          ERR(ERR_CAN_BUS_OFF);
           sprintf(errString, "(%ld.%ld) ERR:can%d went to bus off state", tv.tv_sec, tv.tv_usec, i);
           stringToSDBuffer(errString);          
         }        
@@ -702,14 +732,15 @@ void appMain(void *parameter) {
       }
       printRxOverflow();
     }
-    if (Serial.available()) {
-      appendFile(SD_MMC, openLogfile, bufferSD);
-      memset(bufferSD, '\0', sizeof(bufferSD));
-      SDpos = 0;
+    if (Serial.available() && !debugMenuActive) {
       debugMenu();
+    } 
+    if (Serial.available() && debugMenuActive) {
+      break;
     }
     //digitalWrite(42, 0);
   }
+  return;
 }
 
 // The Arduino IDE expects this but it's more convenient to create our own tasks
