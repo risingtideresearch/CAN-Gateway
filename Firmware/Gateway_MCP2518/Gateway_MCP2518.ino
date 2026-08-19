@@ -51,7 +51,7 @@ uint16_t errorRegister = 0;
 uint8_t busErrorFlags[6];
 
 #define CAN_ERR_CHECK_INTERVAL_SECONDS 15 // Check CAN controllers for bus errors at most this often
-uint64_t lastCheckCANErr = 0;
+time_t lastCheckCANErr = 0;
 bool checkCANErr = 0; // Put the burden of time_t comparisons on core 0 task and use flag to alert core 1 task
 bool freshCANErr = 0;
 
@@ -89,7 +89,7 @@ QueueHandle_t canRxQueue;
 
 uint32_t canRxOverflowCount;    // Number of times canRxQueue has overflowed since boot
 std::atomic<uint32_t> canRxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
-uint64_t canRxOverflowLastLog;  // Timestamp of the last time we logged overflows
+time_t canRxOverflowLastLog;  // Timestamp of the last time we logged overflows
 
 // Buffer for writing to storage
 char bufferSD[SIZE_SDMMC_BUFFER_IN_BYTES];
@@ -169,9 +169,7 @@ void checkCANErrors(uint8_t channel) {
 
 // Get RXMsg from MCP2518 over SPI. Time critical. 
 bool rx(uint8_t channel) {
-
-  //digitalWrite(41, 1);
-
+  
   CANFrame newFrame;
 
   if (canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data) == 1) {
@@ -196,9 +194,6 @@ bool rx(uint8_t channel) {
     canRxOverflowCount++;
     canRxOverflowInterval++;
   }
-  
-  //digitalWrite(41, 0);
-
   return 1;
 }
 
@@ -325,8 +320,8 @@ void printErrors() {
 // Periodically print a warning if any CAN RX messages were dropped
 void printRxOverflow() {
   gettimeofday(&tv, NULL);
-  uint64_t now = tv.tv_sec;
-  if (canRxOverflowInterval > 0 && canRxOverflowLastLog - now > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS) {
+  time_t now = tv.tv_sec;
+  if (canRxOverflowInterval > 0 && now - canRxOverflowLastLog > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS) {
     uint64_t intervalCount = canRxOverflowInterval.exchange(0);
     canRxOverflowLastLog = now;
     Serial.print("RX Queue Overflow recent=");
@@ -394,18 +389,6 @@ void setup() {
 
   // Start Logfile
   openNewLog();
-  
-  //DEBUG FLAGS
-  /*
-  pinMode(41, OUTPUT);
-  digitalWrite(41, 0);
-  pinMode(42, OUTPUT);
-  digitalWrite(42, 0);
-  pinMode(45, OUTPUT);
-  digitalWrite(45, 0);
-  pinMode(46, OUTPUT);
-  digitalWrite(46, 0);
-  */
   
   // Create CAN RX buffer queue
   canRxQueue = xQueueCreate(SIZE_CAN_RX_QUEUE_IN_FRAMES, sizeof(CANFrame));
@@ -523,7 +506,7 @@ void debugMenu() {
   for (;;) {
     Serial.println("DEBUG MENU");
     Serial.println("---------------------");
-    Serial.println("1) Dump Current Log to Serial");
+    Serial.println("1) Start New Log");
     Serial.println("2) Delete Current Log");
     Serial.println("3) Test SD Card Read/Write");
     Serial.println("4) Set System Time");
@@ -533,7 +516,8 @@ void debugMenu() {
     ANSI_clear();
     switch (Serial.read()) {
       case '1': 
-        readFile(SD_MMC, openLogfile);
+        openNewLog();
+        Serial.println("Attempting to Close Log and open New Log...");
         Serial.println("Press Any Key To Return");
         wait();
         Serial.read(); // Throw away the "any key"
@@ -634,7 +618,6 @@ void stringToSDBuffer(char* inString){
 void appMain(void *parameter) {
 
   for (;;) {
-    //digitalWrite(42, 1);
     CANFrame frame;
     // Receive a frame from other task. Blocks up to TIMEOUT_SD_FLUSH_MS.
     bool new_frame = xQueueReceive(canRxQueue, &frame, pdMS_TO_TICKS(TIMEOUT_SD_FLUSH_MS));
@@ -672,14 +655,12 @@ void appMain(void *parameter) {
       } else if (canFlow == CAN_TO_SERIAL) {
         Serial.println(logEntry);
       } 
-      //digitalWrite(45, 0);
     }
 
     // Flush to SD if either of:
     // - SIZE_SDMMC_CHUNK_WRITE_IN_BYTES waiting to write
     // - No message received for TIMEOUT_SD_FLUSH_MS and there is anything to write
     if (SDpos > SIZE_SDMMC_CHUNK_WRITE_IN_BYTES || (!new_frame && SDpos > 0)) {
-      //digitalWrite(46, 1);
       chunkWrites++;
       appendFile(SD_MMC, openLogfile, bufferSD);
       memset(bufferSD, '\0', sizeof(bufferSD));
@@ -690,11 +671,11 @@ void appMain(void *parameter) {
         openNewLog();
       }
       SDpos = 0;
-      //digitalWrite(46, 0);
     }
 
     gettimeofday(&tv, NULL);
-    if (lastCheckCANErr - tv.tv_sec > CAN_ERR_CHECK_INTERVAL_SECONDS) {
+    if (tv.tv_sec - lastCheckCANErr > CAN_ERR_CHECK_INTERVAL_SECONDS) {
+      lastCheckCANErr = tv.tv_sec;
       checkCANErr = 1;
     }
 
@@ -738,7 +719,6 @@ void appMain(void *parameter) {
     if (Serial.available() && debugMenuActive) {
       break;
     }
-    //digitalWrite(42, 0);
   }
   return;
 }
