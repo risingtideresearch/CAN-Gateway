@@ -1,6 +1,40 @@
-// FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=enabled,LoopCore=0
+/*******************************************************************************
+ * @file        Gateway_MCP2518.ino
+ * @brief       Prototype Logging Firmware for CAN Gateway 
+ * @author      Nick Poole
+ * @date        August 19, 2026
+ * 
+ * This is the first prototype release firmware for CAN Gateway hardware v02
+ * It receives CAN traffic on 6 channels simultaneously (at 250kbps) and logs
+ * all frames in human-readable format on an inserted SD card. The debug menu
+ * allows a user to set the time in unix timestamp format, which is kept using
+ * the on-board RTC and used to timestamp the log files. CAN traffic can also
+ * be streamed to the Serial terminal. This firmware will drop CAN frames if
+ * all 6 busses are fully saturated. 
+ * 
+ * Copyright (c) 2026 Rising Tide Research Foundation
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy 
+ * of this software and associated documentation files (the “Software”), to deal 
+ * in the Software without restriction, including without limitation the rights 
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies 
+ * of the Software, and to permit persons to whom the Software is furnished to do so, 
+ * subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all 
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, 
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A 
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT 
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF 
+ * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE 
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 // Arduino IDE Board Settings
 // https://github.com/espressif/arduino-esp32
+// FQBN: esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=enabled,LoopCore=0
 // Board: "ESP32S3 Dev Module"
 // USB CDC On Boot: "Enabled"
 // CPU Frequency: "240MHz (WiFi)"
@@ -19,45 +53,47 @@
 // Upload Speed: "921600"
 // USB Mode: "Hardware CDC and JTAG"
 
-#include <atomic>
-#include <SPI.h>
-#include <SparkFun_I2C_Expander_Arduino_Library.h> //https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
-#include <esp_task_wdt.h>
-#include <freertos/queue.h>
-#include <RV3028C7.h>
-#include "mcp2518fd_can.h"
-#include "FS.h"
-#include "SD_MMC.h"
-#include "time.h"
+#include <SparkFun_I2C_Expander_Arduino_Library.h> // https://github.com/sparkfun/SparkFun_I2C_Expander_Arduino_Library
+#include <RV3028C7.h> // https://github.com/MacroYau/RV-3028-C7-Arduino-Library
+#include <atomic> 
+#include <SPI.h> 
+#include <esp_task_wdt.h> 
+#include <freertos/queue.h> 
+#include "mcp2518fd_can.h" // Local Fork
+#include "FS.h" 
+#include "SD_MMC.h" 
+#include "time.h" 
 
 // Storage related parameters
-#define SIZE_CAN_RX_QUEUE_IN_FRAMES 1024
-#define SIZE_SDMMC_BUFFER_IN_BYTES 65536
+#define SIZE_CAN_RX_QUEUE_IN_FRAMES     1024
+#define SIZE_SDMMC_BUFFER_IN_BYTES      65536
 #define SIZE_SDMMC_CHUNK_WRITE_IN_BYTES 32767
-#define SIZE_MAXIMUM_LOGFILE_IN_MBYTES 200
+#define SIZE_MAXIMUM_LOGFILE_IN_MBYTES  200
 
 // Error printing helpers
-#define ERR_CAN_FAILED_TO_READ_BUFFER_STATUS 0x01
-#define ERR_SD_FAILED_TO_OPEN_FILE 0x02
-#define ERR_SD_FAILED_TO_WRITE_FILE 0x04
-#define ERR_SD_FAILED_TO_DELETE_FILE 0x08
-#define ERR_LOG_BUFFER_WRAP 0x10
-#define ERR_CAN_FAILED_TO_READ_REGISTER 0x20
-#define ERR_CAN_RX_PASSIVE 0x40
-#define ERR_CAN_TX_PASSIVE 0x80
-#define ERR_CAN_BUS_OFF 0x100
+#define ERR_CAN_FAILED_TO_READ_BUFFER_STATUS  0x01
+#define ERR_SD_FAILED_TO_OPEN_FILE            0x02
+#define ERR_SD_FAILED_TO_WRITE_FILE           0x04
+#define ERR_SD_FAILED_TO_DELETE_FILE          0x08
+#define ERR_LOG_BUFFER_WRAP                   0x10
+#define ERR_CAN_FAILED_TO_READ_REGISTER       0x20
+#define ERR_CAN_RX_PASSIVE                    0x40
+#define ERR_CAN_TX_PASSIVE                    0x80
+#define ERR_CAN_BUS_OFF                       0x100
 #define VERBOSE_ERR true
 uint16_t errorRegister = 0;
 uint8_t busErrorFlags[6];
 
-#define CAN_ERR_CHECK_INTERVAL_SECONDS 15 // Check CAN controllers for bus errors at most this often
-time_t lastCheckCANErr = 0;
-bool checkCANErr = 0; // Put the burden of time_t comparisons on core 0 task and use flag to alert core 1 task
-bool freshCANErr = 0;
+#define CAN_ERR_CHECK_INTERVAL_SECONDS 30 // Check CAN controllers for bus errors at most this often
+time_t lastCheckCANErr = 0;               // Keep track of the last time CAN controllers were polled for errors
+bool checkCANErr = 0;                     // Put the burden of time_t comparisons on core 0 task and use flag to alert core 1 task
+bool freshCANErr = 0;                     // Flag to alert loggingTask when there is an error
 
-#define CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS 10 // Log about queue overflow at most this often
+// Log about queue overflow at most this often
+#define CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS 10 
 
-#define TIMEOUT_SD_FLUSH_MS 50 // Flush a partial buffer to SD if the bus is quiet for this many milliseconds
+// Flush a partial buffer to SD if the bus is quiet for this many milliseconds
+#define TIMEOUT_SD_FLUSH_MS 50 
 
 // GPIO Expander
 SFE_PCA95XX io(PCA95XX_PCA9534);
@@ -123,6 +159,7 @@ SPIClass *spi1 = new SPIClass(HSPI);
 bool exitMenu = false;
 bool debugMenuActive = false;
 
+// Flag to change the destination of CAN logs
 typedef enum
 {
   CAN_TO_SDMMC,
@@ -143,13 +180,17 @@ void ERR(uint16_t errorCode)
   return;
 }
 
-// Set the ESP32 system time from the RTC
+/************************************************************************** 
+ * Function:    setTimeFromRTC
+ * Purpose:     Set the ESP32 system time from the RTC
+ * Parameters:  None
+ * Returns:     bool  - true if successful 
+**************************************************************************/
 bool setTimeFromRTC()
 {
   uint32_t rtcTime = rtc.getUnixTimestamp();
   struct timeval systime;
   int rc;
-  // Serial.println(rtcTime);
   systime.tv_sec = rtcTime;
   systime.tv_usec = 0;
   rc = settimeofday(&systime, NULL);
@@ -172,6 +213,13 @@ bool setTimeFromRTC()
   return 0;
 }
 
+/************************************************************************** 
+ * Function:    checkCANErrors
+ * Purpose:     Call the MCP2518 Library's checkError() function for 
+ *              channel and store in busErrorFlags[] for channel
+ * Parameters:  uint8_t   - CAN channel number
+ * Returns:     void 
+**************************************************************************/
 void checkCANErrors(uint8_t channel)
 {
   byte errorFlags;
@@ -180,22 +228,26 @@ void checkCANErrors(uint8_t channel)
   return;
 }
 
-// Get RXMsg from MCP2518 over SPI. Time critical.
-bool rx(uint8_t channel)
+/************************************************************************** 
+ * Function:    pollCANForMsg
+ * Purpose:     Poll CAN controller @ channel for a new message.
+ * Parameters:  uint8_t   - CAN channel number
+ * Returns:     bool      - true if successful
+**************************************************************************/
+bool pollCANForMsg(uint8_t channel)
 {
   CANFrame newFrame;
 
+  // If there's no message in the buffer then skip
   if (canChannel[channel]->readMsgBuf(&newFrame.dlc, newFrame.data) == 1)
   {
     return 0;
   }
   // Else, get the message
 
-  gettimeofday(&tv, NULL);
+  gettimeofday(&tv, NULL); // Update timeval
 
-  // This can be optimized. Basically copying a structure that
-  // already exists in the lib. Could modify lib to just hand
-  // over the struct
+  // Fill in frame data
   newFrame.channel = channel;
   newFrame.timeSec = tv.tv_sec;
   newFrame.timeuSec = tv.tv_usec;
@@ -203,6 +255,7 @@ bool rx(uint8_t channel)
   newFrame.ext = canChannel[channel]->isExtendedFrame();
   newFrame.id = canChannel[channel]->getCanId();
 
+  // Attempt to queue up the received frame
   if (!xQueueSend(canRxQueue, &newFrame, 0))
   {
     // CAN RX queue is full, the other task will log this as a warning
@@ -212,7 +265,14 @@ bool rx(uint8_t channel)
   return 1;
 }
 
-/***SD Convenience Functions***/
+/************************************************************************** 
+ * Function:    writeFile
+ * Purpose:     Write a character array to a file
+ * Parameters:  FS      - Target filesystem
+ *              char*   - Filepath
+ *              char*   - message to write
+ * Returns:     void
+**************************************************************************/
 void writeFile(fs::FS &fs, const char *path, const char *message)
 {
   Serial.printf("Writing file: %s\n", path);
@@ -235,6 +295,14 @@ void writeFile(fs::FS &fs, const char *path, const char *message)
   return;
 }
 
+/************************************************************************** 
+ * Function:    appendFile
+ * Purpose:     Append a character array to the end of a file
+ * Parameters:  FS      - Target filesystem
+ *              char*   - Filepath
+ *              char*   - message to append
+ * Returns:     void
+**************************************************************************/
 void appendFile(fs::FS &fs, const char *path, const char *message)
 {
   File file = fs.open(path, FILE_APPEND);
@@ -254,6 +322,13 @@ void appendFile(fs::FS &fs, const char *path, const char *message)
   return;
 }
 
+/************************************************************************** 
+ * Function:    readFile
+ * Purpose:     Print the contents of a file to Serial
+ * Parameters:  FS      - Target filesystem
+ *              char*   - Filepath
+ * Returns:     void
+**************************************************************************/
 void readFile(fs::FS &fs, const char *path)
 {
   Serial.printf("Reading file: %s\n", path);
@@ -275,6 +350,13 @@ void readFile(fs::FS &fs, const char *path)
   return;
 }
 
+/************************************************************************** 
+ * Function:    deleteFile
+ * Purpose:     Delete a file
+ * Parameters:  FS      - Target filesystem
+ *              char*   - Filepath
+ * Returns:     void
+**************************************************************************/
 void deleteFile(fs::FS &fs, const char *path)
 {
   Serial.printf("Deleting file: %s\n", path);
@@ -287,9 +369,14 @@ void deleteFile(fs::FS &fs, const char *path)
   }
   return;
 }
-/***************************/
 
-// Format new filename, open file for writing, reset size counter
+/************************************************************************** 
+ * Function:    openNewLog
+ * Purpose:     Format a new filename, open the file for writing, and 
+ *              reset file size counter
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void openNewLog()
 {
   gettimeofday(&tv, NULL);
@@ -299,7 +386,12 @@ void openNewLog()
   return;
 }
 
-// Pretty-print the contents of the Error Register to Serial
+/************************************************************************** 
+ * Function:    printErrors
+ * Purpose:     Pretty-print the contents of the Error Register to Serial
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void printErrors()
 {
   if (errorRegister & ERR_CAN_FAILED_TO_READ_BUFFER_STATUS)
@@ -366,7 +458,14 @@ void printErrors()
   return;
 }
 
-// Periodically print a warning if any CAN RX messages were dropped
+/************************************************************************** 
+ * Function:    printRxOverflow
+ * Purpose:     Periodically print a warning if any CAN RX messages were 
+ *              dropped (The queue was full when pollCANForMsg tried to 
+ *              push to it)
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void printRxOverflow()
 {
   gettimeofday(&tv, NULL);
@@ -382,7 +481,12 @@ void printRxOverflow()
   }
 }
 
-// Initialize ALL THE THINGS
+/************************************************************************** 
+ * Function:    setup
+ * Purpose:     Initialize all peripherals, create RXQueue, Pin tasks, etc.
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void setup()
 {
   Serial.begin(921600);
@@ -443,7 +547,7 @@ void setup()
   // Trickle charge enable + Direct switching mode + 3kOhm charge resistance
   backupReg |= 0b00110100;
   rtc.writeByteToEEPROM(0x37, backupReg);
-  // Serial.println(rtc.readByteFromEEPROM(0x37));
+
   //  Set system time from RTC
   setTimeFromRTC();
 
@@ -475,17 +579,27 @@ void setup()
   esp_task_wdt_add(loggingTask);
 }
 
+/************************************************************************** 
+ * Function:    initCAN
+ * Purpose:     Start SPI peripherals and attempt to initialize all 
+ *              CAN controllers. Report status to Serial. Will retry
+ *              each channel mcpInitRetry number of times.
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void initCAN()
 {
   // Start SPI busses
   spi0->begin(14, 12, 13, -1);
   spi1->begin(11, 9, 10, -1);
 
+  // Call beginTransaction() on both SPI busses. We only call this
+  // once at startup because using begin/endTransaction slows SPI
+  // transactions to a crawl
   spi0->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
   spi1->beginTransaction(SPISettings(20000000, MSBFIRST, SPI_MODE0));
 
-  // Configure and start each CAN tcvr
-
+  // Configure and start each CAN controller
   for (uint8_t i = 0; i < 6; i++)
   {
     canChannel[i]->setMode(CAN_CLASSIC_MODE);
@@ -526,7 +640,17 @@ void initCAN()
   return;
 }
 
-// This task is pinned to Core 1.
+/************************************************************************** 
+ * Function:    canMonitor
+ * Purpose:     This task is pinned to Core 1 and monopolizes the core
+ *              in order to poll the CAN controllers as quickly as 
+ *              possible. At 250kbps, the minimum frame length (depending
+ *              on bit packing) is 188uS. Ideally, the for-loop in this
+ *              function executes in less time, so as not to back up the
+ *              CAN controller FIFO
+ * Parameters:  void*   - Task Parameters
+ * Returns:     void
+**************************************************************************/
 void canMonitor(void *parameter)
 {
   esp_task_wdt_init(10, false);
@@ -539,7 +663,7 @@ void canMonitor(void *parameter)
     // Poll all of the CAN transceivers
     for (uint8_t i = 0; i < 6; i++)
     {
-      rx(i);
+      pollCANForMsg(i);
     }
     if (checkCANErr)
     {
@@ -555,13 +679,24 @@ void canMonitor(void *parameter)
   return;
 }
 
-// Convenience function to write the ANSI Terminal Clear Escape Sequence
-// Arduino IDE Serial Terminal doesn't respect ANSI Escape codes but
-// Most terminal emulators do
+/************************************************************************** 
+ * Function:    ANSI_clear
+ * Purpose:     Convenience function to write the ANSI Terminal Clear 
+ *              Escape Sequence. Arduino IDE Serial Terminal doesn't 
+ *              respect ANSI Escape codes but most terminal emulators do
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void ANSI_clear() { Serial.write("\033[2J\033[H", 7); }
 
-// Convenience function to empty the Serial receive buffer and wait for
-// user input during menu navigation
+/************************************************************************** 
+ * Function:    wait
+ * Purpose:     Convenience function to empty the Serial receive buffer 
+ *              and wait for user input during menu navigation without 
+ *              blocking appMain()
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void wait()
 {
   while (Serial.available())
@@ -574,7 +709,13 @@ void wait()
   return;
 }
 
-// Debug menu. Pauses logging and allows manipulation of MCP2515 and Storage
+/************************************************************************** 
+ * Function:    debugMenu
+ * Purpose:     Display Serial Debug Menu. Logging continues while the 
+ *              menu is open.
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
 void debugMenu()
 {
   exitMenu = false; // Lazy flag to break from menu loop
@@ -687,6 +828,14 @@ void debugMenu()
   return;
 }
 
+/************************************************************************** 
+ * Function:    stringToSDBuffer
+ * Purpose:     Convenience function to write the contents of a 
+ *              character array to the SD write buffer. Appends a 
+ *              newline to the end.
+ * Parameters:  char* - Character array to write to SD  
+ * Returns:     void
+**************************************************************************/
 void stringToSDBuffer(char *inString)
 {
   for (uint8_t idx = 0; inString[idx] != '\0'; idx++)
@@ -699,8 +848,16 @@ void stringToSDBuffer(char *inString)
   return;
 }
 
-// This task is pinned to Core 0. Its job is to read CAN frames
-// from the buffer queue, format them, and write to the storage.
+/************************************************************************** 
+ * Function:    appMain
+ * Purpose:     This task is pinned to Core 0. All of the application
+ *              logic is spawned from here. It consumes CAN frames from
+ *              the RXQueue, formats them, and delivers them to either
+ *              storage or Serial. This task also manages various timers
+ *              and launches the debug menu.
+ * Parameters:  void*   - Task Parameters
+ * Returns:     void
+**************************************************************************/
 void appMain(void *parameter)
 {
   for (;;)
@@ -710,7 +867,8 @@ void appMain(void *parameter)
     bool new_frame = xQueueReceive(canRxQueue, &frame, pdMS_TO_TICKS(TIMEOUT_SD_FLUSH_MS));
     if (new_frame)
     {
-      digitalWrite(45, 1);
+      // Format each byte of frame data and append to a character array
+      // Give values under 0x10 a leading zero. Terminate array with '\0'
       char rawtoa[64];
       uint8_t rawidx = 0;
       char buf[3];
@@ -738,8 +896,9 @@ void appMain(void *parameter)
         memset(buf, 0, sizeof(buf));
       }
       rawtoa[rawidx] = '\0';
+      // Format the log entry using sprintf
       char logEntry[64];
-      if (frame.rtr)
+      if (frame.rtr) // If the frame is a Request Frame, format accordingly
       {
         sprintf(logEntry, "(%ld.%ld) can%d %X#R", frame.timeSec, frame.timeuSec, frame.channel, frame.id);
       }
@@ -775,6 +934,8 @@ void appMain(void *parameter)
       SDpos = 0;
     }
 
+    // Check if the CAN_ERR_CHECK_INTERVAL_SECONDS has elapsed since
+    // last CAN error check. If so, flag the Core 1 process.
     gettimeofday(&tv, NULL);
     if (tv.tv_sec - lastCheckCANErr > CAN_ERR_CHECK_INTERVAL_SECONDS)
     {
@@ -782,6 +943,7 @@ void appMain(void *parameter)
       checkCANErr = 1;
     }
 
+    // If new CAN bus errors are present, set ERR bits and record to log
     if (freshCANErr)
     {
       char errString[64];
@@ -823,11 +985,11 @@ void appMain(void *parameter)
       }
       printRxOverflow();
     }
-    if (Serial.available() && !debugMenuActive)
+    if (Serial.available() && !debugMenuActive) // If the user has sent a Serial character, launch the menu
     {
       debugMenu();
     }
-    if (Serial.available() && debugMenuActive)
+    if (Serial.available() && debugMenuActive) // If the menu is active, we're in a second instance of appMain. Break out.
     {
       break;
     }
