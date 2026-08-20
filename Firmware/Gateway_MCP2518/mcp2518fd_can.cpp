@@ -1,4 +1,36 @@
-/* Most of this code are derived from Microchip MCP2518FD SDK */
+/*******************************************************************************
+ * @file        mcp2518fd_can
+ * @brief       MCP2518FD CAN Controller Library 
+ * @author      Seeed Technology Inc., Modified by Nick Poole
+ * @date        August 19, 2026
+ * 
+ * This is a fork of the Seeed Technology Inc. CAN BUS library which adds features
+ * particular to the CAN Gateway application and removes features which target
+ * CAN BUS controller ICs other than the MCP2518FD. The original was derived largely 
+ * from the Microchip MCP2518FD SDK and has been modified and distributed in 
+ * accordance with the MIT license. 
+ * 
+ * Copyright (c) 2013 Seeed Technology Inc.
+ * Copyright (c) 2026 Rising Tide Research Foundation
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy 
+ * of this software and associated documentation files (the “Software”), to deal 
+ * in the Software without restriction, including without limitation the rights 
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies 
+ * of the Software, and to permit persons to whom the Software is furnished to do so, 
+ * subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all 
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, 
+ * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A 
+ * PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT 
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF 
+ * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE 
+ * OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ******************************************************************************/
+
 #include "mcp2518fd_can.h"
 
 static CAN_CONFIG config;

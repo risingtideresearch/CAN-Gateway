@@ -19,6 +19,7 @@ _autosave-*
 *-save.kicad_pcb
 fp-info-cache
 /CAN_Gateway/CAN_Gateway-backups
+/Firmware/Gateway_MCP2518/.vscode
 
 # Netlist files (exported from Eeschema)
 *.net
