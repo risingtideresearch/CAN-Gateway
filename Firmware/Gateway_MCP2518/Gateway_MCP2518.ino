@@ -66,6 +66,7 @@
 
 // Storage related parameters
 #define SIZE_CAN_RX_QUEUE_IN_FRAMES     1024
+#define SIZE_CAN_TX_QUEUE_IN_FRAMES     1024
 #define SIZE_SDMMC_BUFFER_IN_BYTES      65536
 #define SIZE_SDMMC_CHUNK_WRITE_IN_BYTES 32767
 #define SIZE_MAXIMUM_LOGFILE_IN_MBYTES  200
@@ -108,7 +109,7 @@ struct timeval tv;
 TaskHandle_t canTask;
 TaskHandle_t loggingTask;
 
-// Struct for the CAN frame buffer
+// Struct for the RX Queue
 struct CANFrame
 {
   uint8_t channel;
@@ -121,8 +122,75 @@ struct CANFrame
   bool ext;
 };
 
+// Struct for the TX Queue
+struct TxFrame
+{
+  uint8_t channel;
+  uint8_t data[8];
+  uint32_t id;
+  uint8_t dlc;
+  uint8_t rtr;
+  uint8_t ext;  
+};
+
+// Struct for storing macro assignments
+struct frameTemplate
+{
+  uint8_t matchChannel;  
+  uint32_t matchID;
+  void (*macro)(CANFrame matchedFrame);
+};
+
+// Length of template array 
+// We declare it because the array is populated at compile time
+// so we might as well instead of calculating at runtime
+uint8_t templateCount = 2;
+
+void testMacroStd(CANFrame matchedFrame)
+{
+  TxFrame outFrame;
+  outFrame.channel = 1;
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    outFrame.data[i] = matchedFrame.data[i];
+  }
+  outFrame.dlc = matchedFrame.dlc;
+  outFrame.ext = matchedFrame.ext;
+  outFrame.rtr = matchedFrame.rtr;
+  outFrame.id = 0x405;
+
+  transmitCANMsg(outFrame.channel, outFrame);
+  return;
+}
+
+void testMacroExt(CANFrame matchedFrame)
+{
+  TxFrame outFrame;
+  outFrame.channel = 2;
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    outFrame.data[i] = matchedFrame.data[i];
+  }
+  outFrame.dlc = matchedFrame.dlc;
+  outFrame.ext = matchedFrame.ext;
+  outFrame.rtr = matchedFrame.rtr;
+  outFrame.id = 0x1CEEFF00;
+
+  transmitCANMsg(outFrame.channel, outFrame);
+  return;
+}
+
+// Array of template objects to match IDs to macros
+const frameTemplate templates[] = {
+  {0, 0x305, testMacroStd},
+  {0, 0x1CEF24E1, testMacroExt}
+};
+
 // Queue for incoming CAN traffic to write CAN traffic to (queue of struct CANFrame)
 QueueHandle_t canRxQueue;
+
+// Queue for outgoing CAN traffic to write CAN traffic to (queue of struct TxFrame)
+QueueHandle_t canTxQueue;
 
 uint32_t canRxOverflowCount;                 // Number of times canRxQueue has overflowed since boot
 std::atomic<uint32_t> canRxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
@@ -262,6 +330,19 @@ bool pollCANForMsg(uint8_t channel)
     canRxOverflowCount++;
     canRxOverflowInterval++;
   }
+  return 1;
+}
+
+/************************************************************************** 
+ * Function:    transmitCANMsg
+ * Purpose:     Send outgoing frame to CAN controller @ channel.
+ * Parameters:  uint8_t   - CAN channel number
+                TxFrame   - CAN frame to transmit
+ * Returns:     bool      - true if successful
+**************************************************************************/
+bool transmitCANMsg(uint8_t channel, TxFrame frame)
+{
+  canChannel[channel]->sendMsgBuf(frame.id, frame.ext, frame.rtr, frame.dlc, frame.data, false);
   return 1;
 }
 
@@ -556,6 +637,9 @@ void setup()
 
   // Create CAN RX buffer queue
   canRxQueue = xQueueCreate(SIZE_CAN_RX_QUEUE_IN_FRAMES, sizeof(CANFrame));
+
+  // Create CAN TX buffer queue
+  canTxQueue = xQueueCreate(SIZE_CAN_TX_QUEUE_IN_FRAMES, sizeof(TxFrame));
 
   // Create pinned task
   xTaskCreatePinnedToCore(canMonitor,         // Task Function
@@ -867,6 +951,15 @@ void appMain(void *parameter)
     bool new_frame = xQueueReceive(canRxQueue, &frame, pdMS_TO_TICKS(TIMEOUT_SD_FLUSH_MS));
     if (new_frame)
     {
+      // Compare to Macro array
+      for (uint8_t tempidx = 0; tempidx < templateCount; tempidx++)
+      {
+        if (templates[tempidx].matchChannel == frame.channel && templates[tempidx].matchID == frame.id) 
+        {
+          templates[tempidx].macro(frame);
+        }
+      }
+
       // Format each byte of frame data and append to a character array
       // Give values under 0x10 a leading zero. Terminate array with '\0'
       char rawtoa[64];
