@@ -141,51 +141,6 @@ struct frameTemplate
   void (*macro)(CANFrame matchedFrame);
 };
 
-// Length of template array 
-// We declare it because the array is populated at compile time
-// so we might as well instead of calculating at runtime
-uint8_t templateCount = 2;
-
-void testMacroStd(CANFrame matchedFrame)
-{
-  TxFrame outFrame;
-  outFrame.channel = 1;
-  for (uint8_t i = 0; i < 8; i++)
-  {
-    outFrame.data[i] = matchedFrame.data[i];
-  }
-  outFrame.dlc = matchedFrame.dlc;
-  outFrame.ext = matchedFrame.ext;
-  outFrame.rtr = matchedFrame.rtr;
-  outFrame.id = 0x405;
-
-  transmitCANMsg(outFrame.channel, outFrame);
-  return;
-}
-
-void testMacroExt(CANFrame matchedFrame)
-{
-  TxFrame outFrame;
-  outFrame.channel = 2;
-  for (uint8_t i = 0; i < 8; i++)
-  {
-    outFrame.data[i] = matchedFrame.data[i];
-  }
-  outFrame.dlc = matchedFrame.dlc;
-  outFrame.ext = matchedFrame.ext;
-  outFrame.rtr = matchedFrame.rtr;
-  outFrame.id = 0x1CEEFF00;
-
-  transmitCANMsg(outFrame.channel, outFrame);
-  return;
-}
-
-// Array of template objects to match IDs to macros
-const frameTemplate templates[] = {
-  {0, 0x305, testMacroStd},
-  {0, 0x1CEF24E1, testMacroExt}
-};
-
 // Queue for incoming CAN traffic to write CAN traffic to (queue of struct CANFrame)
 QueueHandle_t canRxQueue;
 
@@ -195,6 +150,10 @@ QueueHandle_t canTxQueue;
 uint32_t canRxOverflowCount;                 // Number of times canRxQueue has overflowed since boot
 std::atomic<uint32_t> canRxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
 time_t canRxOverflowLastLog;                 // Timestamp of the last time we logged overflows
+
+uint32_t canTxOverflowCount;                 // Number of times canRxQueue has overflowed since boot
+std::atomic<uint32_t> canTxOverflowInterval; // Number of times canRxQueue has overflowed since last log line
+time_t canTxOverflowLastLog;                 // Timestamp of the last time we logged overflows
 
 // Buffer for writing to storage
 char bufferSD[SIZE_SDMMC_BUFFER_IN_BYTES];
@@ -240,6 +199,65 @@ uint8_t mcpInitRetry = 5;
 
 // Name of the open logfile
 char openLogfile[20];
+
+void testMacroStd(CANFrame matchedFrame)
+{
+  TxFrame outFrame;
+  outFrame.channel = 1;
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    outFrame.data[i] = matchedFrame.data[i];
+  }
+  outFrame.dlc = matchedFrame.dlc;
+  outFrame.ext = matchedFrame.ext;
+  outFrame.rtr = matchedFrame.rtr;
+  outFrame.id = 0x405;
+
+    // Attempt to queue up the outgoing frame
+  if (!xQueueSend(canTxQueue, &outFrame, 0))
+  {
+    // CAN TX queue is full, the other task will log this as a warning
+    canTxOverflowCount++;
+    canTxOverflowInterval++;
+  }
+
+  return;
+}
+
+void testMacroExt(CANFrame matchedFrame)
+{
+  TxFrame outFrame;
+  outFrame.channel = 2;
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    outFrame.data[i] = matchedFrame.data[i];
+  }
+  outFrame.dlc = matchedFrame.dlc;
+  outFrame.ext = matchedFrame.ext;
+  outFrame.rtr = matchedFrame.rtr;
+  outFrame.id = 0x1CEEFF00;
+
+    // Attempt to queue up the outgoing frame
+  if (!xQueueSend(canTxQueue, &outFrame, 0))
+  {
+    // CAN TX queue is full, the other task will log this as a warning
+    canTxOverflowCount++;
+    canTxOverflowInterval++;
+  }
+
+  return;
+}
+
+// Length of template array 
+// We declare it because the array is populated at compile time
+// so we might as well instead of calculating at runtime
+uint8_t templateCount = 2;
+
+// Array of template objects to match IDs to macros
+const frameTemplate templates[] = {
+  {0, 0x305, testMacroStd},
+  {0, 0x1CEF24E1, testMacroExt}
+};
 
 // Add an error code to the register for printing in VERBOSE mode
 void ERR(uint16_t errorCode)
@@ -563,6 +581,29 @@ void printRxOverflow()
 }
 
 /************************************************************************** 
+ * Function:    printTxOverflow
+ * Purpose:     Periodically print a warning if any CAN TX messages were 
+ *              dropped (The queue was full when a macro tried to 
+ *              push to it)
+ * Parameters:  None
+ * Returns:     void
+**************************************************************************/
+void printTxOverflow()
+{
+  gettimeofday(&tv, NULL);
+  time_t now = tv.tv_sec;
+  if (canTxOverflowInterval > 0 && now - canTxOverflowLastLog > CAN_QUEUE_OVERFLOW_LOG_INTERVAL_SECONDS)
+  {
+    uint64_t intervalCount = canTxOverflowInterval.exchange(0);
+    canTxOverflowLastLog = now;
+    Serial.print("TX Queue Overflow recent=");
+    Serial.print(intervalCount);
+    Serial.print(" total=");
+    Serial.println(canTxOverflowCount);
+  }
+}
+
+/************************************************************************** 
  * Function:    setup
  * Purpose:     Initialize all peripherals, create RXQueue, Pin tasks, etc.
  * Parameters:  None
@@ -741,6 +782,7 @@ void canMonitor(void *parameter)
   esp_task_wdt_add(NULL);
 
   initCAN();
+  TxFrame outFrame;
 
   for (;;)
   {
@@ -757,6 +799,10 @@ void canMonitor(void *parameter)
       }
       checkCANErr = 0;
       freshCANErr = 1;
+    }
+    if (xQueueReceive(canTxQueue, &outFrame, 1))
+    {
+      transmitCANMsg(outFrame.channel, outFrame);
     }
     esp_task_wdt_reset();
   }
@@ -1077,6 +1123,7 @@ void appMain(void *parameter)
         printErrors();
       }
       printRxOverflow();
+      printTxOverflow();
     }
     if (Serial.available() && !debugMenuActive) // If the user has sent a Serial character, launch the menu
     {
